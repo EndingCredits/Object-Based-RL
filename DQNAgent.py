@@ -69,17 +69,17 @@ class DQNAgent():
         elif self.model_type == 'object':
             from networks import object_embedding_network2
             state_dim = [None] + self.obs_size
-            model = lambda x: object_embedding_network2( x, args.emb_layers, args.out_layers )
+            model = object_embedding_network2
             
             
         self.state = tf.placeholder("float", state_dim)
             
         with tf.variable_scope(self.name + '_pred'):
-            emb, _ = model(self.state)
-            self.pred_qs, _, _ = linear(tf.nn.relu(emb), self.n_actions)
+            emb = model(self.state)
+            self.pred_qs = linear(tf.nn.relu(emb), self.n_actions)
         with tf.variable_scope(self.name + '_target', reuse=False):
-            emb, _ = model(self.state)
-            self.target_pred_qs, _, _ = linear(tf.nn.relu(emb), self.n_actions)
+            emb = model(self.state)
+            self.target_pred_qs = linear(tf.nn.relu(emb), self.n_actions)
             
         self.pred_weights = tf.get_collection(
             tf.GraphKeys.GLOBAL_VARIABLES, scope=self.name+'_pred')

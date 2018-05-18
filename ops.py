@@ -1,125 +1,186 @@
 import tensorflow as tf
-from tensorflow.contrib.layers.python.layers import initializers
+from tensorflow.contrib.layers.python.layers import initializers 
 
-def conv2d(x,
-           output_dim,
-           kernel_size,
-           stride,
-           initializer=tf.contrib.layers.xavier_initializer(),
-           activation_fn=tf.nn.relu,
-           data_format='NHWC',
-           padding='VALID',
-           name='conv2d'):
-  with tf.variable_scope(name):
-    if data_format == 'NCHW':
-      stride = [1, 1, stride[0], stride[1]]
-      kernel_shape = [kernel_size[0], kernel_size[1], x.get_shape()[1], output_dim]
-    elif data_format == 'NHWC':
-      stride = [1, stride[0], stride[1], 1]
-      kernel_shape = [kernel_size[0], kernel_size[1], x.get_shape()[-1], output_dim]
+def linear(x, out_size, **kwargs):
+    return tf.layers.dense(x, out_size, **kwargs)
 
-    w = tf.get_variable('w', kernel_shape, tf.float32, initializer=initializer)
-    conv = tf.nn.conv2d(x, w, stride, padding, data_format=data_format)
 
-    b = tf.get_variable('biases', [output_dim], initializer=tf.constant_initializer(0.0))
-    out = tf.nn.bias_add(conv, b, data_format)
+def conv2d(*args, **kwargs):
+    return tf.layers.conv2d(*args, **kwargs)
 
-  if activation_fn != None:
-    out = activation_fn(out)
 
-  return out, w, b
+################################################################################
+######################## Set network layers ####################################
+################################################################################
 
-def linear(input_, output_size, stddev=0.1, bias_start=0.0, activation_fn=None, name='linear'):
-  shape = input_.get_shape().as_list()
-
-  with tf.variable_scope(name):
-    w = tf.get_variable('Matrix', [shape[1], output_size], tf.float32,
-        tf.random_normal_initializer(stddev=stddev))
-    b = tf.get_variable('bias', [output_size],
-        initializer=tf.constant_initializer(bias_start))
-
-    out = tf.nn.bias_add(tf.matmul(input_, w), b)
-
-    if activation_fn != None:
-      return activation_fn(out), w, b
-    else:
-      return out, w, b
-
-def flatten(input_):
-    in_list = [x for x in input_ if x is not None]
-    if type(in_list[0]) is list:
-      in_list = [flatten(elem) for elem in in_list ]
+def equiv_submax(x,
+                 mask=None,
+                 name='submax'):
+    """
+    """
     
-    return tf.concat([ tf.reshape(elem, [-1]) for elem in in_list], axis=0)
+    out = x - pool(x, mask, keepdims=True)
+    
+    return out
 
 
+def self_attn_qkv(x,
+                  key_size,
+                  value_size=None,
+                  num_heads=1,
+                  mask=None,
+                  name='self_attn_qkv'):
+    """
+    Adapted from tensor2tensor library.
+    
+    It is assumed that x is of shape .... x N x C where N is the number of
+    elements and C is the number of channels. 
+    
+    TODO: add initializer, and activation functions
+    """
+    value_size = key_size if value_size is None else value_size
+    
+    with tf.variable_scope(name):
+      q = linear(x, key_size, use_bias=False, name='query')
+      k = linear(x, key_size, use_bias=False, name='key')
+      v = linear(x, value_size, use_bias=False, name='value')
+      
+    def split_heads(x, num_heads):
+        return reshape_range(x, [num_heads, -1])
+    
+    if num_heads != 1:
+      q = split_heads(q, num_heads)
+      k = split_heads(k, num_heads)
+      v = split_heads(v, num_heads)
+      
+      if mask is not None:
+          mask = tf.expand_dims(mask, -1) #Will be the same mask for every head
+      
+      key_depth_per_head = key_size // num_heads
+      q *= key_depth_per_head**-0.5
+      
+    def dot_product_attn(q, k, v, mask=None):
+        logits = tf.matmul(q, k, transpose_b=True) # ... x l_q x l_k
+        if mask is not None:
+            bias = (1-mask)*10e9
+            logits = logits + bias
+        weights = tf.nn.softmax(logits)
+        return tf.matmul(weights, v)
+    
+    v_out = dot_product_attn(q, k, v, mask)
+    
+    def join_heads(x):
+        return reshape_range(x, [-1], -2, 2)
+        
+    if num_heads != 1:
+        v_out = join_heads(v_out)
+      
+    out = v_out
+    
+    return out
 
-# Permutation invariant layer
-def invariant_layer(inputs, out_size, context=None, activation_fct='ReLU', name='', seed=123):
 
-    in_size = inputs.get_shape().as_list()[-1]
-    if context is not None:
-      context_size = context.get_shape().as_list()[-1]
+def pool(x,
+         mask=None,
+         keepdims=False,
+         pool_type='max'):
+    """
+    
+    """
 
-    with tf.variable_scope(name) as vs:
-      w_e = tf.Variable(tf.random_normal((in_size,out_size), stddev=0.1, seed=seed), name='w_e')
-      if context is not None:
-        w_c = tf.Variable(tf.random_normal((context_size,out_size), stddev=0.1, seed=seed), name='w_c')
-      b = tf.Variable(tf.zeros(out_size), name='b')
+    if pool_type == 'max':
+        if mask is not None:
+            x = x * mask - (1.0 - mask)*10e9
+        out = tf.reduce_max(x, -2, keepdims)
+        
+    elif pool_type == 'sum':
+        if mask is not None:
+            x = x * mask
+        out = tf.reduce_sum(x, -2, keepdims)
+            
+    elif pool_type == 'mean':
+        if mask is not None:
+            x = x * mask
+            x_sum = tf.reduce_sum(x, -2, keepdims)
+            out = x_sum / tf.reduce_sum(mask, -2, keepdims)
+        else:
+            out = tf.reduce_mean(x, -2, keepdims)
 
-    if context is not None:
-       context_part = tf.expand_dims(tf.matmul(context, w_c), 1)
-    else:
-       context_part = 0
+    return out
     
-    element_part = tf.nn.conv1d(inputs, [w_e], stride=1, padding="SAME")
 
-    elements = tf.nn.relu(element_part + context_part + b)
-    
-    params = [w_e, w_c, b] if context is not None else [w_e, b]
 
-    # Returns elements, their invariant and  the weights
-    return elements, params
-    
-    
-def relation_layer(out_size, state, mask, name=''):
-    in_size = state.get_shape()[2]
-    num_elems = tf.shape(state)[1]
-    
-    flat_shape = [-1, num_elems*num_elems, out_size]
-    mat_shape = [-1, num_elems, num_elems, out_size]
-    
-    combined, params_1 = invariant_layer(state, 2*out_size)
-    q, k = tf.split(combined, [out_size, out_size], axis=2)
-    
-    qk = tf.expand_dims(q, -3) + tf.expand_dims(k, -2)
-    #qk = tf.reshape(qk, flat_shape)
-    #qk = tf.reshape(qk, mat_shape)
-    
-    mask_ = tf.expand_dims(mask, -3) * tf.expand_dims(mask, -2)
-    qk_ = qk - (1-mask_)*10e9
-    
-    qk = tf.nn.softmax(qk_, dim=3)
+################################################################################
+########################### General utils ######################################
+################################################################################
 
-    out = tf.reduce_max(qk, 2)# / tf.reduce_sum(mask_, -2)
-    
-    return out, params_1
 
+def reshape_range(x, new_shape, dim_start=-1, num_dims=1):
+    """
+    Split's the dim_start'th dimension into a new set of dimensions of shape
+    new_shape.
+    A range of dims can be reshaped at once by changing num_dims
+    """
+    in_shape = x.get_shape().as_list()
+    dim_start = dim_start % len(in_shape)
+    start_dims = in_shape[:dim_start]
+    end_dims = in_shape[dim_start+num_dims:]
+    
+    out_shape = start_dims + new_shape + end_dims
+    
+    out = tf.reshape(x, out_shape)
+    
+    return out
+    
 
 def get_mask(x):
     # Returns a matrix with values set to 1 where elements aren't padding
     emb_sum = tf.reduce_sum(tf.abs(x), axis=-1, keep_dims=True)
-    return 1.0 - tf.to_float(tf.equal(emb_sum, 0.0))
+    mask = 1.0 - tf.to_float(tf.equal(emb_sum, 0.0))
+    return tf.stop_gradient(mask)
     
+    
+def combine_weights(in_list):
+    # Returns a 1D tensor of the input list of tensors
+    new_list = [ combine_weights(x) if type(x) is list else tf.reshape(x, [-1]) for x in in_list if x is not None ]
+    return None if all(x is None for x in new_list) else tf.concat( [ x for x in new_list if x is not None ], axis=0)
+        
+    # For all non-none elements in the list,
+    #   1.) if a list recurse on the list
+    #   2.) if not a list, must be a tensor so flatten
+    # If resulting list has only None Elements, return None
+    # else return concatenation of all non-none elements of list
 
-def mask_and_pool(embeds, mask, pool_type='max'):
-    # Use broadcasting to multiply
-    masked_embeds = tf.multiply(embeds, mask)
+    
+################################################################################
+############################ Legacy code #######################################
+################################################################################
 
-    # Pool using max pooling
-    embed = tf.reduce_max(masked_embeds, 1)
+def __linear(x,
+           out_size,
+           initializer=tf.contrib.layers.xavier_initializer(),
+           bias_start=0.0,
+           activation_fn=None,
+           name='linear'):
+    """
+    Applies a linear transformation to input and returns the result.
+    Assumes input is of the form ... x C where C is the number of channels.
+    TODO: Use tf.layers.dense instead
+    """
+    
+    # Get weights and bias
+    in_size = x.get_shape().as_list()[-1]
+    with tf.variable_scope(name):
+        w = tf.get_variable('w', [in_size, out_size], tf.float32,
+            initializer=initializer)
+        b = tf.get_variable('b', [out_size],
+            initializer=tf.constant_initializer(bias_start))
 
-    # For mean pooling:
-    #embed = tf.reduce_sum(masked_embeds, 1) / tf.reduce_sum(mask, 1)
+    # Apply weights and biases
+    out = tf.nn.bias_add(tf.matmul(x, w), b)
 
-    return embed
+    if activation_fn != None:
+        out = activation_fn(out)
+      
+    return out
+    

@@ -52,13 +52,15 @@ for g in games:
   for a in agent_types:
     args = defaults()
     args.seed = 123
+    #N.B: Currently only the environment is seeded, and not the agent.
     
     args.learning_rate = random.choice(lr)
     layer_size = random.choice(ls)
     num_emb_layers = random.choice(num_e_l)
     num_out_layers = random.choice(num_o_l)
     
-    #name = "lr{}_ls{}_el{}_ol{}".format(args.learning_rate, layer_size, num_emb_layers, num_out_layers)
+    #name = "lr{}_ls{}_el{}_ol{}".format(args.learning_rate, layer_size,
+    #  num_emb_layers, num_out_layers)
     #args.save_file = 'hparamres/' + g + '_' + name
     
     args.emb_layers = [layer_size]*num_emb_layers
