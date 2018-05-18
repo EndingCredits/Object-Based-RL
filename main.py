@@ -7,12 +7,12 @@ from tqdm import tqdm
 import numpy as np
 import tensorflow as tf
 
-#import NECAgent
 import DQNAgent
 
 #TODO: Split this into a separate agent initiation of agent and env and training
 def run_agent(args):
-  # Launch the graph
+
+  # Launch the tensorflow graph
   config = tf.ConfigProto()
   config.gpu_options.allow_growth=True
   with tf.Session(config=config) as sess:
@@ -48,13 +48,16 @@ def run_agent(args):
             import gym_vgdl #This can be found on my github if you want to use it.
         except:
             pass
+            
         env = gym.make(args.env)
         if mode is None:
             shape = env.observation_space.shape
             if len(shape) is 3: mode = 'DQN'
             elif shape[0] is None: mode = 'object'
             else: mode = 'vanilla'
-        args.num_actions = env.action_space.n #only works with discrete action spaces
+        #N.B: only works with discrete action spaces
+        args.num_actions = env.action_space.n 
+
 
     # Set agent variables
     if mode=='DQN':

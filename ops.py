@@ -1,8 +1,26 @@
 import tensorflow as tf
 from tensorflow.contrib.layers.python.layers import initializers 
 
+
+################################################################################
+###################### Standard network layers #################################
+################################################################################
+
+
 def linear(x, out_size, **kwargs):
     return tf.layers.dense(x, out_size, **kwargs)
+    
+def feedforward(x, layers = [128], **kwargs):
+    """
+    Concatenates a number of linear layers.
+    """
+    fc = x
+    for i, layer in enumerate(layers):
+        fc = linear(fc, layer, name='l_' + str(i), **kwargs)
+    
+    out = fc
+
+    return out
 
 
 def conv2d(*args, **kwargs):
@@ -17,6 +35,13 @@ def equiv_submax(x,
                  mask=None,
                  name='submax'):
     """
+    The 'equivariant' transformation used in the "Deep Sets" paper. N.B: In the
+    paper it is combined with a linear transformation (and is actually a special
+    case of the more general 'context-concatenation' equivariant layer) but we
+    find it more useful to use this as a separate layer.
+    
+    It is assumed that x is of shape .... x N x C where N is the number of
+    elements and C is the number of channels. 
     """
     
     out = x - pool(x, mask, keepdims=True)
@@ -85,7 +110,11 @@ def pool(x,
          keepdims=False,
          pool_type='max'):
     """
+    Applies some pooling function along the penultimate dimension, and applies a
+    mask where appropriate.
     
+    It is assumed that x is of shape .... x N x C where N is the number of
+    elements and C is the number of channels. 
     """
 
     if pool_type == 'max':
@@ -134,22 +163,37 @@ def reshape_range(x, new_shape, dim_start=-1, num_dims=1):
     
 
 def get_mask(x):
-    # Returns a matrix with values set to 1 where elements aren't padding
+    """
+    Returns a matrix with values set to 1 where elements aren't padding
+    Assumes input is of the form [...] x C, and that empy inputs are all 0 hence
+    we return a matrix of shape [...] x 1 with 0's in locations where last
+    dimension is all 0, and 1 elsewhere.
+    """
+    
     emb_sum = tf.reduce_sum(tf.abs(x), axis=-1, keep_dims=True)
     mask = 1.0 - tf.to_float(tf.equal(emb_sum, 0.0))
     return tf.stop_gradient(mask)
     
     
 def combine_weights(in_list):
-    # Returns a 1D tensor of the input list of tensors
-    new_list = [ combine_weights(x) if type(x) is list else tf.reshape(x, [-1]) for x in in_list if x is not None ]
-    return None if all(x is None for x in new_list) else tf.concat( [ x for x in new_list if x is not None ], axis=0)
+    """
+    Returns a 1D tensor of the input list of (nested lists of) tensors, useful
+    for doing things like comparing current weights with old weights for EWC.
+    
+    1.) For all elements in input list, (ln 3)
+          if a list combine it recursively 
+          else leave it alone
+    2.) From resulting list, get all non-none elements and flatten them (ln 2)
+    3.) If resulting list is empty return None (ln 1)
+          else return concatenation of list
+    ( All on one line :) )
+    """
+    
+    return (lambda x: None if not x else tf.concat(x, axis=0)) (
+        [ tf.reshape(x, [-1]) for x in
+        [ combine_weights(x) if isinstance(x, list) else x for x in in_list ]
+        if x is not None])
         
-    # For all non-none elements in the list,
-    #   1.) if a list recurse on the list
-    #   2.) if not a list, must be a tensor so flatten
-    # If resulting list has only None Elements, return None
-    # else return concatenation of all non-none elements of list
 
     
 ################################################################################
@@ -183,4 +227,28 @@ def __linear(x,
         out = activation_fn(out)
       
     return out
+    
+def ___combine_weights(in_list):
+    # Returns a 1D tensor of the input list of tensors
+    
+    # 1.) For all elements in input list, if a list, combine it (via recursion)
+    # 2.) From resulting list, get all non-none elements and flatten them
+    # 3.) If resulting list is empty return None
+    #       else return concatenation of list
+    
+    # Method 1
+    #new_list = [ combine_weights(x) if type(x) is list else tf.reshape(x, [-1]) for x in in_list if x is not None ]
+    #return None if all(x is None for x in new_list) else tf.concat( [ x for x in new_list if x is not None ], axis=0)
+    
+    # Method 2
+    #return map(lambda x: tf.concat(x, axis=0), filter(None, ([combine_weights(x) if isinstance(x, list) else tf.reshape(x, [-1]) for x in in_list if x is not None],)))
+    
+    # Method 3
+    #elements = [ tf.reshape(x, [-1]) for x in  [ combine_weights(x)
+    #    if isinstance(x, list) else x for x in in_list ] if x is not None]
+    #return None if not elements else tf.concat(elements, axis=0)
+    
+    # Method 4
+    return (lambda x: None if not x else tf.concat(x, axis=0)) ([ tf.reshape(x, [-1]) for x in  [ combine_weights(x) if isinstance(x, list) else x for x in in_list ] if x is not None])
+    
     
