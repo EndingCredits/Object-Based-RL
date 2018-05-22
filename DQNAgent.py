@@ -137,7 +137,8 @@ class DQNAgent():
 
     def _get_state(self, t=-1):
         # Returns the compiled state from stored observations
-        t = t % self.trajectory_t
+        if self.trajectory_t > 0:
+            t = t % self.trajectory_t
 
         if self.history_len == 0:
             # We don't use histories so we can just return current
@@ -182,7 +183,7 @@ class DQNAgent():
             states, _ = batch_objects(states)
             poststates, _ = batch_objects(poststates)
         
-        if use_double_q: #N.B: Not used
+        if self.use_double_q: #N.B: Not used
             # Predict action with current network
             action = np.argmax(self.pred_qs.eval({self.state: states}), axis=1)
             #   neat little trick for getting one-hot:
