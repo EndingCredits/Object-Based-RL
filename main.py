@@ -50,6 +50,11 @@ def run_agent(args):
             pass
             
         env = gym.make(args.env)
+        if args.env == 'vgdl_generic-v0':
+            #env._obs_type = 'objects'
+            from vgdl_game_example import aliens_game, aliens_level
+            env.loadGame(aliens_game, aliens_level)
+            
         if mode is None:
             shape = env.observation_space.shape
             if len(shape) is 3: mode = 'DQN'
@@ -80,13 +85,23 @@ def run_agent(args):
         args.preprocessor = 'default'
         args.obs_size = list(env.observation_space.shape)
         args.history_len = 0
+    
+    # Override for object detection from images
+    if args.objdetect:
+        from object_detection_wrappers import TestObjectDetectionWrapper
+        env = TestObjectDetectionWrapper(env)
+        args.model = 'object'
+        args.preprocessor = 'default'
+        args.obs_size = list(env.observation_space.shape)
+        args.history_len = 0
+        
+    print("Building agent for env shape " + str(args.obs_size))
 
     # Create agent
     agent = DQNAgent.DQNAgent(sess, args)
 
     # Initialize all tensorflow variables
     sess.run(tf.global_variables_initializer())
-
 
     # Keep training until reach max iterations
 
@@ -98,12 +113,13 @@ def run_agent(args):
 
     for step in tqdm(range(training_iters), ncols=80):
 
-        #env.render()
-
         # Act, and add 
         action, value = agent.GetAction()
         state, reward, terminal, info = env.step(action)
         agent.Update(action, reward, state, terminal)
+        
+        if args.render:
+            env.render()
 
         # Bookeeping
         rewards.append(reward)
@@ -153,6 +169,8 @@ def run_agent(args):
         action, value = agent.GetAction()
         state, reward, terminal, info = env.step(action)
         agent.Update(action, reward, state, terminal)
+        if args.render:
+            env.render()
         step += 1
     
     # Final test       
@@ -169,7 +187,7 @@ def run_agent(args):
         agent.Save(args.chk_file)
                  
 
-def test_agent(agent, env):
+def test_agent(agent, env, render=True):
     try:
         state = env.reset(train=False)
     except:
@@ -182,6 +200,8 @@ def test_agent(agent, env):
         action, value = agent.GetAction()
         state, reward, terminal, info = env.step(action)
         agent.Update(action, reward, state, terminal)
+        if render:
+            env.render()
         R += reward
     return R
     
@@ -205,9 +225,14 @@ if __name__ == '__main__':
                        help='Gym environment to use')
     parser.add_argument('--model', type=str, default=None,
                        help='Leave None to automatically detect')
+    parser.add_argument('--objdetect', type=int, default=0,
+                       help='Set true to use object detection and object detection network')
 
     parser.add_argument('--seed', type=int, default=123,
                        help='Seed to initialise the agent with')
+                       
+    parser.add_argument('--render', type=int, default=1,
+                       help='Set false to diable rendering')
 
     parser.add_argument('--training_iters', type=int, default=5000000,
                        help='Number of training iterations to run for')
@@ -226,7 +251,6 @@ if __name__ == '__main__':
                        help='Size of replay memory')
     parser.add_argument('--learn_step', type=int, default=4,
                        help='Number of steps in between learning updates')
-
 
     parser.add_argument('--discount', type=float, default=0.99,
                        help='Discount factor')

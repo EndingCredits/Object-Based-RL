@@ -174,7 +174,7 @@ class DQNAgent():
 
     def _train(self, states, actions, rewards, poststates, terminals):
         # train on a given sample
- 
+        
         # set training flag
         self.started_training = True
         
@@ -308,7 +308,8 @@ def batch_objects(input_list):
     #   returns a corresponding n x m x 1 mask.
     max_len = 0
     out = []; masks = []
-    for i in input_list: max_len = max(len(i),max_len)
+    for i in input_list:
+        max_len = max(len(i),max_len)
     for l in input_list:
         # Zero pad output
         out.append(np.pad(np.array(l,dtype=np.float32),

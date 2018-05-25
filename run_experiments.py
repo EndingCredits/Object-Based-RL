@@ -3,7 +3,7 @@ import tensorflow as tf
 
 import random
 
-agent_types = ['objects']#['image', 'objects', 'features']
+agent_types = ['image', 'objects', 'features']
 games = ['aliens', 'boulderdash', 'missilecommand', 'survivezombies', 'zelda']
 
 model_names = { 'image' : 'image', 'objects': 'object', 'features': 'vanilla' }
@@ -46,6 +46,8 @@ class defaults():
     epsilon_anneal=500000
     
     chk_file=None
+    objdetect=0
+    render=0
     
 
 for g in games:
