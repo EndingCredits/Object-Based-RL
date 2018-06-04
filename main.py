@@ -296,7 +296,7 @@ if __name__ == '__main__':
     col_a_width = 20 ; col_b_width = 16
     print(' ' + '_'*(col_a_width+1+col_b_width) + ' ')
     print('|' + ' '*col_a_width + '|' + ' '*col_b_width  + '|')
-    line = "|{:>" + str(col_a_width-1) + "} | {:<" + str(col_b_width-1) + "}|"
+    line = "|{!s:>" + str(col_a_width-1) + "} | {!s:<" + str(col_b_width-1) + "}|"
     for i in arg_dict:
         print(line.format(i, arg_dict[i]))
     print('|' + '_'*col_a_width + '|' + '_'*col_b_width  + '|')

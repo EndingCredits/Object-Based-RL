@@ -1,0 +1,7 @@
+numpy>=1.14.3
+opencv-python>=3.4.1.15
+scikit-learn>=0.18.1
+tensorflow>=1.8.0
+tqdm>=4.10.0
+-e git+https://github.com/EndingCredits/gym-utils.git@7b4399cb8d9478fef737558878c53bab9b3987e6#egg=gym_utils
+-e git+https://github.com/EndingCredits/gym_vgdl.git@5ea2bc6b179ecc17e5f2d5425fead07c5ec5380c#egg=gym_vgdl

@@ -6,7 +6,10 @@ from gym_vgdl.list_space import list_space
 import pygame
 from pygame.locals import *
 
-from gym_utils.frame_history_wrapper import FrameHistoryWrapper
+try:
+    from gym_utils.frame_history_wrapper import aFrameHistoryWrapper
+except:
+    from frame_history_wrapper import FrameHistoryWrapper
 
 from copy import deepcopy
 
@@ -16,7 +19,7 @@ import numpy as np
 
 class GenericObjectDetectionWrapper(Wrapper):
     '''
-    Template for
+    Template for generic object detection
     '''
     
     # Stores last 2 frames
@@ -120,9 +123,6 @@ class GenericObjectDetectionWrapper(Wrapper):
     
     
     
-    
-from feature_extractors import OpenCVBoundingBoxExtractor
-
 class TestObjectDetectionWrapper(GenericObjectDetectionWrapper):
 
     # Stores last 2 frames
@@ -146,8 +146,12 @@ class TestObjectDetectionWrapper(GenericObjectDetectionWrapper):
         
         edges = cv2.Canny(imgray, 20, 100)
         ret, thresh = cv2.threshold(edges, 127, 255, 0)
-        contours, hierarchy = cv2.findContours(thresh, 
-            cv2.RETR_TREE,cv2.CHAIN_APPROX_SIMPLE)
+        try: 
+            contours, hierarchy = cv2.findContours(thresh, 
+                cv2.RETR_TREE,cv2.CHAIN_APPROX_SIMPLE)
+        except:
+            _, contours, hierarchy = cv2.findContours(thresh, 
+                cv2.RETR_TREE,cv2.CHAIN_APPROX_SIMPLE)
         contours = [cont for cont in contours
             if cv2.arcLength(cont, True) > self.ARC_THRESHOLD]
 

@@ -29,7 +29,10 @@ def deepmind_CNN(state,
 
     # Flatten final layer
     shape = conv3.get_shape().as_list()
-    conv3_flat = tf.reshape(conv3, [-1, reduce(lambda x, y: x * y, shape[1:])])
+    flat_shape = 1
+    for dim in shape[1:]:
+        flat_shape *= dim
+    conv3_flat = tf.reshape(conv3, [-1, flat_shape])
 
     # Apply a final linear layer
     out = linear(conv3_flat, output_size,

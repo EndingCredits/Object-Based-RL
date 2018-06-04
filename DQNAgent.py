@@ -278,7 +278,7 @@ class DQNAgent():
 
             if terminal:
               # Add stored data to replay memory
-              for t in xrange(self.trajectory_t):
+              for t in range(self.trajectory_t):
                 self.memory.add(self.trajectory_observations[t],
                                 self.trajectory_actions[t],
                                 self.trajectory_rewards[t],
