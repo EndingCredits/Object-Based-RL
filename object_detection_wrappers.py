@@ -7,7 +7,10 @@ from gym_vgdl.list_space import list_space
 import pygame
 from pygame.locals import *
 
-from gym_utils.frame_history_wrapper import FrameHistoryWrapper
+try:
+    from gym_utils.frame_history_wrapper import aFrameHistoryWrapper
+except:
+    from frame_history_wrapper import FrameHistoryWrapper
 
 from copy import deepcopy
 

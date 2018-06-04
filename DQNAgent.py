@@ -13,12 +13,12 @@ from gym_utils.replay_memory import ReplayMemory
 class DQNAgent(RolloutActor):
     def __init__(self, session, args):
         super(DQNAgent, self).__init__()
- 
+
         # Set up agent parameters:
         ##################################
 
         self.name = "DQNAgent"
-        
+
         # Environment details
         self.obs_size = args.obs_size
         self.n_actions = args.num_actions
@@ -45,7 +45,7 @@ class DQNAgent(RolloutActor):
         self.learning_rate = args.learning_rate
         self.learn_step = args.learn_step
         self.target_update_step = 1000
-        
+
         # Set up other variables:
         ##################################
 
@@ -58,10 +58,10 @@ class DQNAgent(RolloutActor):
 
         # Replay Memory
         self.memory = ReplayMemory(self.memory_size, self.obs_size)
-        
+
         ##################################
 
-        
+
         # Select appropriate model and input state shape:
         ##################################
         if self.model_type == 'CNN':
@@ -75,16 +75,16 @@ class DQNAgent(RolloutActor):
             model = object_embedding_network2
             #from networks import relational_object_network
             #model = relational_object_network
-            
+
         prepend = [None] if self.history_len == 0 else [ None, self.history_len]
         state_dim = prepend + self.obs_size
 
         ##################################
-        
+
 
         ##### Build Tensorflow graph:
         ####################################################################
-        
+
         self.state = tf.placeholder("float", state_dim)
         self.action = tf.placeholder('int64', [None])
         self.poststate = tf.placeholder("float", state_dim)
@@ -93,7 +93,7 @@ class DQNAgent(RolloutActor):
 
         # Apply model to get output action values:
         ##################################
-        
+
         # Get action value estimates for normal and target network:
         #   (Apply chosen model and then a final linear layer)
         with tf.variable_scope(self.name + '_pred'):
@@ -110,8 +110,8 @@ class DQNAgent(RolloutActor):
           #with tf.variable_scope(self.name + '_prev', reuse=False):
           #  emb = model(self.poststate)
           #  self.prev_post_qs = linear(tf.nn.relu(emb), self.n_actions)
-          
-                                   
+
+
         # Get model weights
         self.pred_weights = tf.get_collection(
             tf.GraphKeys.GLOBAL_VARIABLES, scope=self.name+'_pred')
@@ -119,18 +119,18 @@ class DQNAgent(RolloutActor):
             tf.GraphKeys.GLOBAL_VARIABLES, scope=self.name+'_target')
         self.prev_weights = tf.get_collection(
             tf.GraphKeys.GLOBAL_VARIABLES, scope=self.name+'_prev')
-       
+
         ##################################
-        
-        
+
+
         # Calculate TD Loss
         ##################################
-        
+
         # Get relevant action
         action_one_hot = tf.one_hot(self.action, self.n_actions, 1.0, 0.0)
         q_acted = tf.reduce_sum(self.pred_qs * action_one_hot, axis=1)
         self.pred_q = q_acted
-        
+
         # Get target value
         if self.use_double_q:
             # Predict action with current network
@@ -139,10 +139,10 @@ class DQNAgent(RolloutActor):
             V_t1 = self.target_post_qs[pred_action]
         else:
             V_t1 = tf.reduce_max(self.target_post_qs, axis=1)
-            
+
         # Zero out target values for terminal states
         V_t1 = V_t1 * (1.0-self.terminal)
-        
+
         # Bellman equation
         if self.use_contracted_bellman:
             eps = 0.01
@@ -157,12 +157,12 @@ class DQNAgent(RolloutActor):
             self.target_q = h( self.reward + self.discount * h_inv( V_t1 ) )
         else:
             self.target_q = self.reward + self.discount * V_t1
-            
+
         self.td_err = tf.stop_gradient(self.target_q) - self.pred_q
-        
+
         ##################################
-        
-        
+
+
         # Loss Function:
         ##################################
 
@@ -171,30 +171,30 @@ class DQNAgent(RolloutActor):
           tf.abs(self.td_err) < 1.0,
           tf.square(self.td_err) * 0.5,
           (tf.abs(self.td_err) - 0.5))
-          
+
         if self.use_tc_loss:
             total_loss += tf.square( tf.reduce_max(self.pred_post_qs, axis=1) \
                          - self.target_q )
-                         
+
         # Optimiser
         self.optim = tf.train.AdamOptimizer(
                         self.learning_rate).minimize(total_loss)
-                        
+
         ##################################
 
         self.targ_update_op = [tf.assign(t, e) for t, e in
                                    zip(self.targ_weights, self.pred_weights)]
-        if self.use_tc_loss:                   
+        if self.use_tc_loss:
           self.tc_update_op = [tf.assign(t, e) for t, e in
                                    zip(self.prev_weights, self.pred_weights)]
-        
+
         # Saver
         self.model_weights = self.pred_weights
         self.saver = tf.train.Saver(self.model_weights)
 
         ####################################################################
 
-        
+
     def _act(self, state):
         # get Q-values of given state from network
         Qs = self.session.run(self.pred_qs, feed_dict={
@@ -219,19 +219,19 @@ class DQNAgent(RolloutActor):
                             self.trajectory.actions[t],
                             self.trajectory.rewards[t],
                             self.trajectory.terminals[t] )
-        
-        
+
+
     def _update(self):
         if self.training:
             self.step += 1
-            
+
             # Update Epsilon
             per = min(self.step / self.epsilon_anneal, 1)
             self.epsilon = (1-per)*self.initial_epsilon + per*self.epsilon_final
 
             if self.memory.count > self.batch_size*2 and \
                    (self.step % self.learn_step) == 0:
-                   
+
                 # Get transition sample from memory
                 s, a, R, s_, t = self.memory.sample(self.batch_size,
                                                         self.history_len)
@@ -249,15 +249,15 @@ class DQNAgent(RolloutActor):
 
     def _train(self, states, actions, rewards, poststates, terminals):
         # train on a given sample
-        
+
         # set training flag
         self.started_training = True
-        
+
         # if using lists we need to batch up sample
         if self.obs_size[0] == None:
             states = batch_objects(states)
             poststates = batch_objects(poststates)
-        
+
         # Train network
         feed_dict = {
           self.state: states,
@@ -271,7 +271,7 @@ class DQNAgent(RolloutActor):
 
     def Reset(self, obs, train=True):
         super(DQNAgent, self).Reset(obs)
-        
+
         # Resets agent for start of new episode
         self.training = train
 
@@ -279,7 +279,7 @@ class DQNAgent(RolloutActor):
         action = super(DQNAgent, self).GetAction()
         value = self.trajectory._curr_other
         return action, value
-        
+
     def Save(self, save_dir):
         # Save model to file
         self.saver.save(self.session, save_dir + '/model.ckpt')
@@ -289,7 +289,7 @@ class DQNAgent(RolloutActor):
         ckpt = tf.train.get_checkpoint_state(save_dir)
         print("Loading model from {}".format(ckpt.model_checkpoint_path))
         self.saver.restore(self.session, ckpt.model_checkpoint_path)
-        
+
         # Also need to initialise target network
         self.session.run(self.targ_update_op)
 
