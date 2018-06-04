@@ -1,6 +1,6 @@
 import numpy as np
 import tensorflow as tf
-from ops import linear, conv2d, feedforward, equiv_submax, pool, get_mask
+from ops import * #sorry
 
 
 def deepmind_CNN(state,
@@ -29,7 +29,10 @@ def deepmind_CNN(state,
 
     # Flatten final layer
     shape = conv3.get_shape().as_list()
-    conv3_flat = tf.reshape(conv3, [-1, reduce(lambda x, y: x * y, shape[1:])])
+    flat_shape = 1
+    for dim in shape[1:]:
+        flat_shape *= dim
+    conv3_flat = tf.reshape(conv3, [-1, flat_shape])
 
     # Apply a final linear layer
     out = linear(conv3_flat, output_size,
@@ -149,7 +152,8 @@ def object_embedding_network(state,
 def object_embedding_network2(state,
                               mask=None,
                               embedding_layers=[128]*4,
-                              output_layers=[128]*3):
+                              output_layers=[128]*3,
+                              use_equivariant=True):
 
     """
     The OEN used for our paper. It is broadly the same architecture used in
@@ -181,7 +185,8 @@ def object_embedding_network2(state,
     
     # Do the rest of the embedding layers with 'submax' equivariant transform
     for i, layer in enumerate(l_e[1:]):
-        el = equiv_submax(el, mask)
+        if use_equivariant:
+            el = equiv_submax(el, mask)
         el = linear(el, layer, activation=activation_fn, name='l' + str(i+1),
                     kernel_initializer=initializer )
     
@@ -204,3 +209,65 @@ def object_embedding_network2(state,
     
     # Returns the network output
     return out
+    
+
+
+
+def relational_object_network(state,
+                              mask=None,):
+
+    """
+    A relational network. Currently testing.
+    
+    Mimics the architecture given in Relational Deep Reinforcement Learning. 
+    """
+    #TODO: Pick a design that more closely relates to the above architecture
+
+
+    # Keeping track of which initilizer and activation funcs are used
+    initializer = tf.truncated_normal_initializer(0, 0.02)
+    activation_fn = tf.nn.relu
+    
+    if mask is None:
+       mask = get_mask(state) # Get mask directly from state
+    
+    # Embedding Part:
+    ##################################
+    el = state
+    
+    # Do the first layer without equivariant transform
+    el = position_preserving_embedding(el, 128, name='initial_embedding')
+    
+    # Add a number of attention blocks
+    for i in range(2):
+        r = None if i == 0 else True
+        el_ = self_attn_qkv(el, 64, 64, num_heads=4, mask=mask, reuse=r)
+        el_ = linear(el_, 128, activation=activation_fn, name='l1',
+                    kernel_initializer=initializer, reuse=r)
+        el_ = linear(el_, 128, activation=activation_fn, name='l2',
+                    kernel_initializer=initializer, reuse=r)
+        el = el + el_
+    
+    # Pool final elements to get input to task network
+    c = pool(el, mask)
+    
+    ##################################
+    
+    
+    # Fully connected (task) part:
+    ##################################
+    
+    l_o = [128]*3
+    
+    fc = c
+    for i, layer in enumerate(l_o):
+        fc = linear(fc, layer, activation=activation_fn, 
+                    kernel_initializer=initializer, name='lO_' + str(i))
+                    
+    ##################################
+    
+    out = fc
+    
+    # Returns the network output
+    return out
+    
