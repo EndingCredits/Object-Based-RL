@@ -49,7 +49,7 @@ class defaults():
     
     chk_file=None
     objdetect=0
-    render=0
+    render=1
     
 
 for g in games:

@@ -104,7 +104,6 @@ class DQNAgent():
         with tf.variable_scope(self.name + '_pred'):
             emb = model(self.state)
             self.pred_qs = linear(tf.nn.relu(emb), self.n_actions)
-        self.use_tc_loss
         with tf.variable_scope(self.name + '_target', reuse=False):
             emb = model(self.state)
             self.target_pred_qs = linear(tf.nn.relu(emb), self.n_actions)
