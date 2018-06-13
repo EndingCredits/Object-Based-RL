@@ -33,26 +33,25 @@ def run_agent(args):
 
     # Set precision for printing numpy arrays, useful for debugging
     #np.set_printoptions(threshold='nan', precision=3, suppress=True)
-    
+
     mode = args.model
-    
+
     # Create environment
     try:
         import gym_vgdl #This can be found on my github if you want to use it.
     except:
         pass
-        
+
     env = gym.make(args.env)
 
     if args.env == 'vgdl_generic-v0':
         #env._obs_type = 'objects'
         from vgdl_game_example import aliens_game, aliens_level
         env.loadGame(aliens_game, aliens_level)
-        
 
     #N.B: only works with discrete action spaces
-    args.num_actions = env.action_space.n 
-    
+    args.num_actions = env.action_space.n
+
     # Autodetect mode
     if mode is None:
         shape = env.observation_space.shape
@@ -62,7 +61,7 @@ def run_agent(args):
             mode = 'object'
         else:
             mode = 'vanilla'
-    
+
     # Set agent variables and wrap env based on chosen mode
     if mode=='DQN':
         args.model = 'CNN'
@@ -90,7 +89,7 @@ def run_agent(args):
         args.preprocessor = 'default'
         args.obs_size = list(env.observation_space.shape)
         args.history_len = 0
-    
+
     # Override for object detection from images
     if args.objdetect:
         from object_detection_wrappers import TestObjectDetectionWrapper
@@ -99,7 +98,7 @@ def run_agent(args):
         args.preprocessor = 'default'
         args.obs_size = list(env.observation_space.shape)
         args.history_len = 0
-   
+
     print("Building agent for env shape " + str(args.obs_size))
 
     # Create agent
@@ -114,11 +113,11 @@ def run_agent(args):
     agent.Reset(state)
     rewards = []
     terminal = False
-    
+
     # Train until we reach max iterations
     for step in trange(training_iters, ncols=80):
 
-        # Act, and add 
+        # Act, and add
         action, value = agent.GetAction()
         state, reward, terminal, info = env.step(action)
         agent.Update(action, reward, state, terminal)
@@ -139,16 +138,16 @@ def run_agent(args):
             if step >= (tests_done)*test_step:
                 tests_done += 1
                 R_s = run_tests(agent, env, test_count, args.render)
-                
+
                 test_results.append({ 'step': step,
                           'scores': R_s,
                           'average': np.mean(R_s),
                           'max': np.max(R_s) })
                 summary = { 'params': vars(args), 'tests': test_results }
-                
+
                 if args.save_file is not None:
                     np.save(args.save_file, summary)
-                
+
                 if args.chk_file is not None:
                     agent.Save(args.chk_file)
 
@@ -171,19 +170,19 @@ def run_agent(args):
                 .format(num_eps, avr_q, avr_ep_reward)
                 +"max_ep_r: {:4.1f}, epsilon: {:4.3f}"\
                 .format(max_ep_reward, agent.epsilon))
-    
+
     # Continue until end of episode
     step = training_iters
     while not terminal:
-        # Act, and add 
+        # Act, and add
         action, value = agent.GetAction()
         state, reward, terminal, info = env.step(action)
         agent.Update(action, reward, state, terminal)
         if args.render:
             env.render()
         step += 1
-    
-    # Final test       
+
+    # Final test
     R_s = run_tests(agent, env, test_count, args.render)
     test_results.append({ 'step': step,
               'scores': R_s,
@@ -192,10 +191,10 @@ def run_agent(args):
     summary = { 'params': vars(args), 'tests': test_results }
     if args.save_file is not None:
         np.save(args.save_file, summary)
-    
+
     if args.chk_file is not None:
         agent.Save(args.chk_file)
-                 
+
 
 def test_agent(agent, env, render=True):
     try:
@@ -214,17 +213,17 @@ def test_agent(agent, env, render=True):
             env.render()
         R += reward
     return R
-    
-    
+
+
 def run_tests(agent, env, test_count=50, render=True):
     R_s = []
-    
+
     # Do test_count tests
     for i in trange(test_count, ncols=50,
       bar_format='Testing: |{bar}| {n_fmt}/{total_fmt}'):
         R = test_agent(agent, env, render)
         R_s.append(R)
-        
+
     tqdm.write("Tests: {}".format(R_s))
     return R_s
 
@@ -240,7 +239,7 @@ if __name__ == '__main__':
 
     parser.add_argument('--seed', type=int, default=123,
                        help='Seed to initialise the agent with')
-                       
+
     parser.add_argument('--render', type=int, default=1,
                        help='Set false to diable rendering')
 
@@ -272,7 +271,7 @@ if __name__ == '__main__':
                        help='Epsilon anneal steps')
 
     parser.add_argument('--save_file', type=str, default=None,
-                       help='Name of save file for test results (leave None for no saving)')                 
+                       help='Name of save file for test results (leave None for no saving)')
     parser.add_argument('--chk_file', type=str, default=None,
                        help='Name of save file (leave None for no saving)')
 
@@ -290,9 +289,9 @@ if __name__ == '__main__':
         print(line.format(i, arg_dict[i]))
     print('|' + '_'*col_a_width + '|' + '_'*col_b_width  + '|')
     print('')
-    
+
     os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-    
+
     try:
         os.environ["DISPLAY"]
     except:

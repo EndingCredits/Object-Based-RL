@@ -8,7 +8,7 @@ import pygame
 from pygame.locals import *
 
 try:
-    from gym_utils.frame_history_wrapper import aFrameHistoryWrapper
+    from gym_utils.frame_history_wrapper import FrameHistoryWrapper
 except:
     from frame_history_wrapper import FrameHistoryWrapper
 

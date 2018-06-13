@@ -110,9 +110,9 @@ class DQNAgent(RolloutActor):
           #with tf.variable_scope(self.name + '_prev', reuse=False):
           #  emb = model(self.poststate)
           #  self.prev_post_qs = linear(tf.nn.relu(emb), self.n_actions)
-
-
         # Get model weights
+
+
         self.pred_weights = tf.get_collection(
             tf.GraphKeys.GLOBAL_VARIABLES, scope=self.name+'_pred')
         self.targ_weights = tf.get_collection(
@@ -307,4 +307,3 @@ def batch_objects(input_list):
         out.append(np.pad(np.array(l,dtype=np.float32),
             ((0,max_len-len(l)),(0,0)), mode='constant'))
     return out
-
