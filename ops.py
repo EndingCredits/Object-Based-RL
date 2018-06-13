@@ -54,6 +54,7 @@ def self_attn_qkv(x,
                   value_size=None,
                   num_heads=1,
                   mask=None,
+                  reuse=None,
                   name='self_attn_qkv'):
     """
     Adapted from tensor2tensor library.
@@ -66,9 +67,9 @@ def self_attn_qkv(x,
     value_size = key_size if value_size is None else value_size
     
     with tf.variable_scope(name):
-      q = linear(x, key_size, use_bias=False, name='query')
-      k = linear(x, key_size, use_bias=False, name='key')
-      v = linear(x, value_size, use_bias=False, name='value')
+      q = linear(x, key_size, use_bias=False, reuse=reuse, name='query')
+      k = linear(x, key_size, use_bias=False, reuse=reuse, name='key')
+      v = linear(x, value_size, use_bias=False, reuse=reuse, name='value')
       
     def split_heads(x, num_heads):
         return reshape_range(x, [num_heads, -1])
@@ -95,7 +96,7 @@ def self_attn_qkv(x,
     v_out = dot_product_attn(q, k, v, mask)
     
     def join_heads(x):
-        return reshape_range(x, [-1], -2, 2)
+        return reshape_range(x, [value_size], -2, 2)
         
     if num_heads != 1:
         v_out = join_heads(v_out)
@@ -144,13 +145,37 @@ def pool(x,
 ################################################################################
 
 
+def shape_list(x):
+    """
+    Taken from tensor2tensor library.
+    
+    Return list of dims, statically where possible.
+    """
+    x = tf.convert_to_tensor(x)
+
+    # If unknown rank, return dynamic shape
+    if x.get_shape().dims is None:
+        return tf.shape(x)
+
+    static = x.get_shape().as_list()
+    shape = tf.shape(x)
+
+    ret = []
+    for i in range(len(static)):
+        dim = static[i]
+        if dim is None:
+            dim = shape[i]
+        ret.append(dim)
+    return ret
+
+
 def reshape_range(x, new_shape, dim_start=-1, num_dims=1):
     """
     Split's the dim_start'th dimension into a new set of dimensions of shape
     new_shape.
     A range of dims can be reshaped at once by changing num_dims
     """
-    in_shape = x.get_shape().as_list()
+    in_shape = shape_list(x)
     dim_start = dim_start % len(in_shape)
     start_dims = in_shape[:dim_start]
     end_dims = in_shape[dim_start+num_dims:]
@@ -167,7 +192,7 @@ def get_mask(x):
     Returns a matrix with values set to 1 where elements aren't padding
     Assumes input is of the form [...] x C, and that empy inputs are all 0 hence
     we return a matrix of shape [...] x 1 with 0's in locations where last
-    dimension is all 0, and 1 elsewhere.
+    dimension is all 0, and 1 elsewhere. (We keep dim for broadcasting).
     """
     
     emb_sum = tf.reduce_sum(tf.abs(x), axis=-1, keep_dims=True)
@@ -194,7 +219,15 @@ def combine_weights(in_list):
         [ combine_weights(x) if isinstance(x, list) else x for x in in_list ]
         if x is not None])
         
-
+        
+def position_preserving_embedding(x, out_size, num_preserve=4, **kwargs):
+    """
+    Returns the concatenation of the first n=num_preserve channels of the input
+    with a linear transformation of the rest of the channels. I.e. performs a
+    linear transformation preserving the first n channels.
+    """
+    n = num_preserve
+    return tf.concat([x[..., :n], linear(x[..., n:], out_size - n)], axis=-1)
     
 ################################################################################
 ############################ Legacy code #######################################

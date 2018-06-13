@@ -2,8 +2,9 @@ from __future__ import division
 import argparse
 import os
 import time
-from tqdm import tqdm
+from tqdm import tqdm, trange
 
+import gym
 import numpy as np
 import tensorflow as tf
 
@@ -36,35 +37,33 @@ def run_agent(args):
     mode = args.model
     
     # Create environment
-    if args.env_type == 'ALE':
-        from environment import ALEEnvironment
-        env = ALEEnvironment(args.rom)
-        if mode is None: mode = 'DQN'
-        args.num_actions = env.numActions()
+    try:
+        import gym_vgdl #This can be found on my github if you want to use it.
+    except:
+        pass
+        
+    env = gym.make(args.env)
 
-    elif args.env_type == 'gym':
-        import gym
-        try:
-            import gym_vgdl #This can be found on my github if you want to use it.
-        except:
-            pass
-            
-        env = gym.make(args.env)
-        if args.env == 'vgdl_generic-v0':
-            #env._obs_type = 'objects'
-            from vgdl_game_example import aliens_game, aliens_level
-            env.loadGame(aliens_game, aliens_level)
-            
-        if mode is None:
-            shape = env.observation_space.shape
-            if len(shape) is 3: mode = 'DQN'
-            elif shape[0] is None: mode = 'object'
-            else: mode = 'vanilla'
-        #N.B: only works with discrete action spaces
-        args.num_actions = env.action_space.n 
-
-
-    # Set agent variables
+    if args.env == 'vgdl_generic-v0':
+        #env._obs_type = 'objects'
+        from vgdl_game_example import aliens_game, aliens_level
+        env.loadGame(aliens_game, aliens_level)
+        
+        
+    #N.B: only works with discrete action spaces
+    args.num_actions = env.action_space.n 
+    
+    # Autodetect mode
+    if mode is None:
+        shape = env.observation_space.shape
+        if len(shape) is 3:
+            mode = 'DQN'
+        elif shape[0] is None:
+            mode = 'object'
+        else:
+            mode = 'vanilla'
+    
+    # Set agent variables based on chosen mode
     if mode=='DQN':
         args.model = 'CNN'
         args.preprocessor = 'deepmind'
@@ -81,7 +80,7 @@ def run_agent(args):
         args.obs_size = list(env.observation_space.shape)
         args.history_len = 0
     elif mode=='vanilla':
-        args.model = 'nn'
+        args.model = 'fully connected'
         args.preprocessor = 'default'
         args.obs_size = list(env.observation_space.shape)
         args.history_len = 0
@@ -103,15 +102,16 @@ def run_agent(args):
     # Initialize all tensorflow variables
     sess.run(tf.global_variables_initializer())
 
-    # Keep training until reach max iterations
+
 
     # Start Agent
     state = env.reset()
     agent.Reset(state)
     rewards = []
     terminal = False
-
-    for step in tqdm(range(training_iters), ncols=80):
+    
+    # Train until we reach max iterations
+    for step in trange(training_iters, ncols=80):
 
         # Act, and add 
         action, value = agent.GetAction()
@@ -130,14 +130,17 @@ def run_agent(args):
             ep_rewards.append(np.sum(rewards))
             rewards = []
 
+            # Run tests
             if step >= (tests_done)*test_step:
                 tests_done += 1
-                R_s = run_tests(agent, env, test_count)
+                R_s = run_tests(agent, env, test_count, args.render)
+                
                 test_results.append({ 'step': step,
                           'scores': R_s,
                           'average': np.mean(R_s),
                           'max': np.max(R_s) })
                 summary = { 'params': vars(args), 'tests': test_results }
+                
                 if args.save_file is not None:
                     np.save(args.save_file, summary)
                 
@@ -157,10 +160,12 @@ def run_agent(args):
                 max_ep_reward = np.max(ep_rewards[ep_reward_last:])
                 avr_q = np.mean(qs[q_last:]) ; q_last = len(qs)
                 ep_reward_last = len(ep_rewards)
-            tqdm.write("{}, {:>7}/{}it | {:3n} episodes,"\
-                .format(time.strftime("%H:%M:%S"), step, training_iters, num_eps)
-                +"q: {:4.3f}, avr_ep_r: {:4.1f}, max_ep_r: {:4.1f}, epsilon: {:4.3f}"\
-                .format(avr_q, avr_ep_reward, max_ep_reward, agent.epsilon))
+            tqdm.write("{}, {:>7}/{}it | "\
+                .format(time.strftime("%H:%M:%S"), step, training_iters)
+                +"{:3n} episodes, q: {:4.3f}, avr_ep_r: {:4.1f}, "\
+                .format(num_eps, avr_q, avr_ep_reward)
+                +"max_ep_r: {:4.1f}, epsilon: {:4.3f}"\
+                .format(max_ep_reward, agent.epsilon))
     
     # Continue until end of episode
     step = training_iters
@@ -174,7 +179,7 @@ def run_agent(args):
         step += 1
     
     # Final test       
-    R_s = run_tests(agent, env, test_count)
+    R_s = run_tests(agent, env, test_count, args.render)
     test_results.append({ 'step': step,
               'scores': R_s,
               'average': np.mean(R_s),
@@ -206,13 +211,13 @@ def test_agent(agent, env, render=True):
     return R
     
     
-def run_tests(agent, env, test_count=50):
+def run_tests(agent, env, test_count=50, render=True):
     R_s = []
     
     # Do test_count tests
-    for i in tqdm(range(test_count), ncols=50,
+    for i in trange(test_count, ncols=50,
       bar_format='Testing: |{bar}| {n_fmt}/{total_fmt}'):
-        R = test_agent(agent, env)
+        R = test_agent(agent, env, render)
         R_s.append(R)
         
     tqdm.write("Tests: {}".format(R_s))

@@ -28,6 +28,10 @@ class DQNAgent():
         self.epsilon_final = args.epsilon_final
         self.epsilon_anneal = args.epsilon_anneal
         self.use_double_q = False
+        self.use_contracted_bellman = False
+        self.use_tc_loss = False
+        # Observe and Look Further:
+        # Achieving Consistent Performance on Atari
 
         # Training parameters
         self.model_type = args.model
@@ -73,7 +77,7 @@ class DQNAgent():
             from networks import deepmind_CNN
             state_dim = [None, self.history_len] + self.obs_size
             model = deepmind_CNN
-        elif self.model_type == 'nn':
+        elif self.model_type == 'fully connected':
             from networks import fully_connected_network
             state_dim = [None] + self.obs_size
             model = fully_connected_network
@@ -81,6 +85,9 @@ class DQNAgent():
             from networks import object_embedding_network2
             state_dim = [None] + self.obs_size
             model = object_embedding_network2
+            
+            from networks import relational_object_network
+            #model = relational_object_network
         ##################################
         
 
@@ -90,22 +97,36 @@ class DQNAgent():
         # Apply model to get output action values:
         ##################################
         self.state = tf.placeholder("float", state_dim)
+        self.poststate = tf.placeholder("float", state_dim)
         
         # Get action value estimates for normal and target network:
         #   (Apply chosen model and then a final linear layer)
         with tf.variable_scope(self.name + '_pred'):
             emb = model(self.state)
             self.pred_qs = linear(tf.nn.relu(emb), self.n_actions)
+        self.use_tc_loss
         with tf.variable_scope(self.name + '_target', reuse=False):
             emb = model(self.state)
             self.target_pred_qs = linear(tf.nn.relu(emb), self.n_actions)
-        
+            
+        if self.use_tc_loss:
+          with tf.variable_scope(self.name + '_pred', reuse=True):
+            emb = model(self.poststate)
+            self.pred_post_qs = linear(tf.nn.relu(emb), self.n_actions)
+          # Not used since we use the target network value
+          #with tf.variable_scope(self.name + '_prev', reuse=False):
+          #  emb = model(self.poststate)
+          #  self.prev_post_qs = linear(tf.nn.relu(emb), self.n_actions)
+          
+                                   
         # Get model weights
         self.pred_weights = tf.get_collection(
             tf.GraphKeys.GLOBAL_VARIABLES, scope=self.name+'_pred')
         self.targ_weights = tf.get_collection(
-            tf.GraphKeys.GLOBAL_VARIABLES, scope=self.name+'_target') 
-        
+            tf.GraphKeys.GLOBAL_VARIABLES, scope=self.name+'_target')
+        self.prev_weights = tf.get_collection(
+            tf.GraphKeys.GLOBAL_VARIABLES, scope=self.name+'_prev')
+       
         
         self.action = tf.placeholder('int64', [None])
         action_one_hot = tf.one_hot(self.action, self.n_actions, 1.0, 0.0)
@@ -117,16 +138,29 @@ class DQNAgent():
         ##################################
         self.target_q = tf.placeholder("float", [None])
         self.td_err = self.target_q - self.pred_q
+        
         # Huber loss, from baselines
         total_loss = tf.where(
           tf.abs(self.td_err) < 1.0,
           tf.square(self.td_err) * 0.5,
           (tf.abs(self.td_err) - 0.5))
+          
+        if self.use_tc_loss:
+            total_loss += tf.square( tf.reduce_max(self.pred_post_qs, axis=1) \
+                         - self.target_q )
+            
         ##################################
         
         # Optimiser
         self.optim = tf.train.AdamOptimizer(
                         self.learning_rate).minimize(total_loss)
+                        
+                        
+        self.targ_update_op = [tf.assign(t, e) for t, e in
+                                   zip(self.targ_weights, self.pred_weights)]
+        if self.use_tc_loss:                   
+          self.tc_update_op = [tf.assign(t, e) for t, e in
+                                   zip(self.prev_weights, self.pred_weights)]
         
         # Saver
         self.model_weights = self.pred_weights
@@ -186,7 +220,7 @@ class DQNAgent():
         if self.use_double_q: #N.B: Not used
             # Predict action with current network
             action = np.argmax(self.pred_qs.eval({self.state: states}), axis=1)
-            #   neat little trick for getting one-hot:
+            # neat little trick for getting one-hot:
             action_one_hot = np.eye(self.n_actions)[action]
 
             # Get value of action from target network
@@ -196,18 +230,33 @@ class DQNAgent():
         # Zero out target values for terminal states
         V_t1 = np.multiply(np.ones(np.shape(terminals)) - terminals, V_t1)
         
+        
+
+        
         # Bellman equation
-        Q_targets = self.discount * V_t1 + rewards
+        if self.use_contracted_bellman:
+            eps = 0.01
+            def h(x):
+                return np.sign(x)*(np.sqrt(np.abs(x)+1) - 1) + eps*x
+            def h_inv(x):
+                # This took a long time to work out...
+                sgn = np.sign(x)
+                c = (2 * eps*(x + sgn) + sgn) / (2*eps**2)
+                d = x * (x+2*sgn) / (eps**2)
+                return c - sgn * np.sqrt( c**2 - d)
+            Q_targets = h( rewards + self.discount * h_inv( V_t1 ) )
+        else:
+            Q_targets = rewards + self.discount * V_t1
 
         # Train network
         feed_dict = {
           self.state: states,
           self.target_q: Q_targets,
-          self.action: actions
+          self.action: actions,
+          self.poststate: poststates
         }
         self.session.run(self.optim, feed_dict=feed_dict)
         
-        return True
 
 
     def Reset(self, obs, train=True):
@@ -272,9 +321,11 @@ class DQNAgent():
 
             if self.step % self.target_update_step == 0:
                 # Update target_network
-                ops = [ self.targ_weights[i].assign(self.pred_weights[i])
-                        for i in range(len(self.targ_weights))]
-                self.session.run(ops)
+                self.session.run(self.targ_update_op)
+
+            if self.use_tc_loss:
+                # Update last weights
+                self.session.run(self.tc_update_op)
 
             if terminal:
               # Add stored data to replay memory
@@ -283,8 +334,6 @@ class DQNAgent():
                                 self.trajectory_actions[t],
                                 self.trajectory_rewards[t],
                                 (t==(self.trajectory_t-1)) )
-                    
-        return True
         
     def Save(self, save_dir):
         # Save model to file
@@ -329,7 +378,8 @@ class ReplayMemory:
     if self.obs_size[0] == None:
         self.observations = [None]*self.memory_size
     else:
-        self.observations = np.empty([self.memory_size]+self.obs_size, dtype=np.float16)
+        self.observations = np.empty([self.memory_size]+self.obs_size,
+                                              dtype=np.float16)
     self.actions = np.empty(self.memory_size, dtype=np.int16)
     self.rewards = np.empty(self.memory_size, dtype=np.float16)
     self.terminal = np.empty(self.memory_size, dtype=np.bool_)
@@ -389,7 +439,8 @@ class ReplayMemory:
       poststates.append(self._get_state(index+1, seq_len))
       
     indexes = np.array(indexes)
-    return prestates, self.actions[indexes], self.rewards[indexes], poststates, self.terminal[indexes+1]
+    return prestates, self.actions[indexes], self.rewards[indexes], \
+               poststates, self.terminal[indexes+1]
 
 
 
