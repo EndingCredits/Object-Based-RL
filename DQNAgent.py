@@ -9,6 +9,8 @@ from ops import linear
 from Actor import RolloutActor
 from gym_utils.replay_memory import ReplayMemory
 
+
+
 class DQNAgent(RolloutActor):
     def __init__(self, session, args):
         super(DQNAgent, self).__init__()
@@ -78,12 +80,14 @@ class DQNAgent(RolloutActor):
         prepend = [None] if self.history_len == 0 else [ None, self.history_len]
         state_dim = prepend + self.obs_size
 
+
         ##################################
         
 
         ##### Build Tensorflow graph:
         ####################################################################
         
+
         self.state = tf.placeholder("float", state_dim)
         self.action = tf.placeholder('int64', [None])
         self.poststate = tf.placeholder("float", state_dim)
@@ -92,8 +96,7 @@ class DQNAgent(RolloutActor):
 
         # Apply model to get output action values:
         ##################################
-
-
+        
         # Get action value estimates for normal and target network:
         #   (Apply chosen model and then a final linear layer)
         with tf.variable_scope(self.name + '_pred'):
@@ -175,12 +178,13 @@ class DQNAgent(RolloutActor):
         if self.use_tc_loss:
             total_loss += tf.square( tf.reduce_max(self.pred_post_qs, axis=1) \
                          - self.target_q )
-
+                         
         # Optimiser
         self.optim = tf.train.AdamOptimizer(
                         self.learning_rate).minimize(total_loss)
                         
         ##################################
+
 
         self.targ_update_op = [tf.assign(t, e) for t, e in
                                    zip(self.targ_weights, self.pred_weights)]
@@ -199,6 +203,7 @@ class DQNAgent(RolloutActor):
         # get Q-values of given state from network
         Qs = self.session.run(self.pred_qs, feed_dict={
                   self.state: [state]})[0]
+
         action = np.argmax(Qs)
         value = Qs[action]
 
@@ -245,6 +250,7 @@ class DQNAgent(RolloutActor):
                 # Update last weights
                 self.session.run(self.tc_update_op)
 
+
     def _train(self, states, actions, rewards, poststates, terminals):
         # train on a given sample
         
@@ -265,6 +271,7 @@ class DQNAgent(RolloutActor):
           self.terminal: terminals
         }
         self.session.run(self.optim, feed_dict=feed_dict)
+
 
     def Reset(self, obs, train=True):
         super(DQNAgent, self).Reset(obs)
@@ -304,3 +311,4 @@ def batch_objects(input_list):
         out.append(np.pad(np.array(l,dtype=np.float32),
             ((0,max_len-len(l)),(0,0)), mode='constant'))
     return out
+
