@@ -8,7 +8,6 @@ import numpy as np
 import cv2
 import tensorflow as tf
 
-
 from ops import linear
 
 from Actor import RolloutActor
@@ -18,15 +17,21 @@ from multiprocessing import Process, Queue, Value
 
 import time
 
+
+import cProfile, pstats
+
+
 class ActorProcess(Process, RolloutActor):
     def __init__(self,
                  id,
                  prediction_queue,
                  env_constructor,
                  training_queue,
-                 state_seq_len=1):
+                 state_seq_len=1,
+                 render=0 ):
         Process.__init__(self)
         RolloutActor.__init__(self)
+        self.daemon = True
         
         self.id = id
         self.prediction_output = prediction_queue
@@ -34,13 +39,17 @@ class ActorProcess(Process, RolloutActor):
         self.training_queue = training_queue
         self.exit_flag = Value('i', 0)
         
+        self.history_len = state_seq_len
+        
+        self.render_flag = Value('i', render)
+        
         self.env_constructor = env_constructor
 
     def _act(self, state):
         self.prediction_output.put((self.id, state))
-        act, other = self.prediction_input.get()
-        return act, other
-        
+        act, probs, values = self.prediction_input.get(True, 60)
+        return act, probs, values
+
     def _save_trajectory(self):
         self.training_queue.put(self.trajectory)
 
@@ -55,7 +64,7 @@ class ActorProcess(Process, RolloutActor):
         while self.exit_flag.value == 0:
             act = self.GetAction()
             obs, reward, terminal, _ = env.step(act)
-            env.render()
+            if self.render_flag.value: env.render()
             self.Update(act, reward, obs, terminal)
             
             if terminal:
@@ -65,38 +74,38 @@ class ActorProcess(Process, RolloutActor):
 
 class PredictorThread(Thread):
     def __init__(self,
-                 id,
-                 input_queue,
-                 output_queues,
-                 prediction_model ):
-        super(PredictorThread, self).__init__()
-        self.setDaemon(True)
-        self.id = id
-        self.input_queue = Queue()
-        self.output_queues = output_queues
-        self.model = prediction_model
+                 server ):
+        super(PredictorThread, self).__init__(daemon=True)
+        self.server = server
         self.exit_flag = False
+        self.paused = False
         
-        
+        self.min_batch_size = 8
+        self.max_batch_size = 32
+
     def run(self):
-        batch_size = 16
-        
-        ids = [ None ] * batch_size
-        states = [ None ] * batch_size
-
+        server = self.server
         while not self.exit_flag:
-            size = 0
-            while size < batch_size and not self.input_queue.empty():
-                ids[size], states[size] = self.input_queue.get()
-                size += 1
-                
-            if size != 0:
-                batch = states[:size]
-                p, v = self.model._get_action(batch)
+          while self.paused:
+            time.sleep(0.01)
+          
+          size = 0
+          ids = [ None ] * self.max_batch_size
+          states = [ None ] * self.max_batch_size
+          
+          while size < self.max_batch_size and \
+            not server.prediction_queue.empty() or size < self.min_batch_size:
+              ids[size], states[size] = server.prediction_queue.get()
+              size += 1
+              
+          if size != 0:
+              batch = states[:size]
+              a, p, v = server._get_action(batch)
 
-                for i in range(size):
-                  if i < len(self.output_queues):
-                    self.output_queues[ids[i]].put((p[i], v[i]))
+              for i in range(size):
+                if i < len(server.actors):
+                  server.actors[ids[i]].prediction_input.put((a[i], p[i], v[i]))
+                
                 
                              
 class PPOAgent(object):
@@ -114,46 +123,213 @@ class PPOAgent(object):
 
         # Reinforcement learning parameters
         self.discount = args.discount
-        #self.n_steps = args.n_step
-        self.initial_epsilon = args.epsilon
-        self.epsilon = self.initial_epsilon
-        self.epsilon_final = args.epsilon_final
-        self.epsilon_anneal = args.epsilon_anneal
+        self.n_steps = args.n_step
 
         # Training parameters
         self.model_type = args.model
         self.history_len = args.history_len
         self.batch_size = args.batch_size
+        self.train_count = 10
         self.learning_rate = args.learning_rate
         
         # Set up other variables:
         ##################################
 
         # Running variables
-        self.train_step = 0
+        self.train_step = 0 
+        self.ep_rs = []
+        self.last_update = time.time()
         self.seed = args.seed
         self.rng = np.random.RandomState(self.seed)
         self.session = session
-        
+
         self.num_actors = 0
         self.actors = []
         
         self.env = env_constructor
         
         # Thread queues
+        self.trajectories_queue_size = 100
+        self.memory_queue_size = self.batch_size*self.train_count*100
         self.prediction_queue = Queue()
-        self.training_queue = Queue()
+        self.training_queue = Queue(self.trajectories_queue_size)
+        self.testing_queue = Queue(self.trajectories_queue_size)
+        self.experience_memory = []
+        
+        # Predictor
+        self.predictor_thread = PredictorThread( self )
+        
+        
+        # Set up model:
+        ##################################
+        if self.model_type == 'CNN':
+            from networks import deepmind_CNN
+            self.model = deepmind_CNN
+        elif self.model_type == 'fully connected':
+            from networks import fully_connected_network
+            self.model = fully_connected_network
+        elif self.model_type == 'object':
+            from networks import object_embedding_network2
+            self.model = object_embedding_network2
+
+        self._build_graph()
+        self.session.run(tf.global_variables_initializer())
+        
+        # Start up threads:
+        ##################################
+        self.predictor_thread.start()
+        
+        
+    def _build_graph(self):
+    
+        # Training graph
+        with tf.name_scope('train'):
+          with tf.device('gpu:0'):
+            self._build_train_graph()
+        
+        # Prediction graph
+        with tf.name_scope('predict'):
+          with tf.device('gpu:0'):
+            self._build_predict_graph()
+            
+
+    def _build_train_graph(self):
+        # Build Queue pipeline
+        with tf.name_scope('input_pipeline'):
+            prepend = [] if self.history_len == 0 else [self.history_len]
+            state_dim = prepend + self.obs_size
+            
+            self.model_train_queue = tf.FIFOQueue(
+              self.memory_queue_size, # min_after_dequeue = 0,
+              dtypes=[tf.float32, tf.int64, tf.float32, tf.float32, tf.float32],
+              shapes = [ state_dim, [], [], [], [self.n_actions] ],
+              names = [ 'state', 'action', 'advantage', 'return', 'actprob' ],
+              name = 'model_train_queue' )
+            self.model_train_queue_len = 0
+            
+            multi_batch_size = self.batch_size
+            batch_size = tf.placeholder_with_default(multi_batch_size, [])
+            batch = self.model_train_queue.dequeue_many(batch_size) 
+            
+            self.state = batch['state']
+            self.action = batch['action']
+            self.advantage = batch['advantage']
+            self.returns = batch['return']
+            self.old_probs = batch['actprob']
+         
+            feed_dict = { 'state': self.state,
+                          'action': self.action,
+                          'advantage': self.advantage,
+                          'return': self.returns,
+                          'actprob': self.old_probs,
+                        }
+            
+            self.model_enqueue = self.model_train_queue.enqueue_many(
+                                            feed_dict, name="queue_data")
+        
+        
+        # Naive implementation of minibatch 
+        
+        trainer = tf.train.AdamOptimizer(learning_rate=self.learning_rate,
+                                         epsilon=1e-5, name='optimizer')
+        train_ops = []                                           
+        for i in range(self.train_count):
+          with tf.name_scope('iteration_'+str(i)):
+            with tf.control_dependencies(train_ops):
+              with tf.variable_scope(self.name + '_model', reuse=tf.AUTO_REUSE):
+                emb = self.model(self.state)
+                predict = linear(tf.nn.relu(emb), self.n_actions, name='probs')
+                value = linear(tf.nn.relu(emb), 1, name='value')
+              
+              # From baselines code
+              eps = 0.05
+              vf_coef = 1.0
+              ent_coef = 0.01
+              
+              probs = tf.nn.softmax(predict, name='normalised_probs') + 1e-5
+              action_oh = tf.one_hot(self.action, self.n_actions, 1.0, 0.0)
+              ratio = tf.reduce_sum(( probs / self.old_probs ) * \
+                                             action_oh, axis=1, name='PPO_r')
+              
+              pg_loss = -self.advantage * ratio
+              pg_loss_clipped = -self.advantage * tf.clip_by_value(ratio,
+                                            1.0 - eps, 1.0 + eps)
+              pg_loss = tf.reduce_mean(tf.maximum(pg_loss, pg_loss_clipped),
+                                        name='PPO_pg_loss')
+              
+              vf_loss = .5 * tf.reduce_mean(tf.square(value - self.returns),
+                                             name='PPO_vf_loss')
+              
+              entrophy = - tf.reduce_sum( probs * tf.log(probs), axis=1)
+              ent_loss = tf.reduce_mean( entrophy, name='PPO_entrophy')
+              
+              total_loss = pg_loss - ent_loss * ent_coef + vf_loss * vf_coef
+              
+              train_ops.append(trainer.minimize(total_loss))
+        self.train_op = tf.group(train_ops)
+                  
+                  
+    def _build_predict_graph(self):
+    
+        prepend = [None] if self.history_len == 0 else [None, self.history_len]
+        state_dim = prepend + self.obs_size
+        
+        self.state_pred = tf.placeholder("float", state_dim, name='state_ph') 
+        
+        with tf.variable_scope(self.name + '_model', reuse=True):
+          emb = self.model(self.state_pred)
+          predict = linear(tf.nn.relu(emb), self.n_actions, name='probs')
+          value = linear(tf.nn.relu(emb), 1, name='value')
+        
+        self.action_probs = tf.nn.softmax(predict) + 1e-5
+        self.value = tf.squeeze(value, axis=1)
+
         
     def _get_action(self, state):
-        num_states = len(state)
-        return [1]*num_states, [1]*num_states
+        if self.obs_size[0] == None:
+            state = batch_objects(state)
+        probs, value = self.session.run([self.action_probs, self.value],
+                                       feed_dict = { self.state_pred: state })
+   
+        num_act = np.shape(probs)[1]
+        try:
+            act = [ np.random.choice(range(num_act), p=prob ) for prob in probs ]
+        except:
+            print(probs)
+        return act, probs, value
         
-    def _add_actor(self):
+    def _add_batch(self, s, a, p, adv, ret):
+        if self.obs_size[0] == None:
+            s = batch_objects(s)
+        feed_dict = {
+            self.state: s,
+            self.action: a,
+            self.old_probs: p,
+            self.advantage: adv,
+            self.returns: ret,
+        }
+        self.session.run(self.model_enqueue, feed_dict=feed_dict)
+        
+    def _train(self, s, a, p, adv, ret):
+        if self.obs_size[0] == None:
+            s = batch_objects(s)
+        feed_dict = {
+            self.state: s,
+            self.action: a,
+            self.old_probs: p,
+            self.advantage: adv,
+            self.returns: ret,
+        }
+        _ = self.session.run(self.train_op, feed_dict=feed_dict)
+        
+        
+    def _add_actor(self, rendering=0):
         actor = ActorProcess(self.num_actors,
                              self.prediction_queue,
                              self.env,
                              self.training_queue,
-                             self.history_len )
+                             self.history_len,
+                             render=rendering )
         self.actors.append(actor)
         self.actors[-1].start()
         self.num_actors += 1
@@ -164,34 +340,46 @@ class PPOAgent(object):
         self.actors[-1].exit_flag.value = True
         self.actors[-1].join()
         self.actors.pop()
+                 
+    def __del__(self):
+        self.predictor_thread.join()
+        while self.actors:
+            self._remove_actor()
+
+    def Train(self):
+        while self.model_train_queue_len < self.batch_size:
+            self._pump_training_queue()
+        for i in range(1):
+            self.model_train_queue_len -= self.batch_size
+            self.session.run(self.train_op)
         
-    def _update_actors(self, batch_size=32):
-        for actor in self.actors:
-            size = 0
-            ids = [ None ] * batch_size
-            states = [ None ] * batch_size
-            
-            # Get 
-            while size < batch_size and not self.prediction_queue.empty():
-                ids[size], states[size] = self.prediction_queue.get()
-                size += 1
+        
+    def _pump_training_queue(self):  
+        # Get training data
+        traj = []
+        while len(traj) == 0:
+            traj = self.training_queue.get()
                 
-            if size != 0:
-                batch = states[:size]
-                p, v = self._get_action(batch)
-
-                for i in range(size):
-                    self.actors[ids[i]].prediction_input.put((p[i], v[i]))
-                    
-    def _get_training_batch(self, batch_size=32):
-        pass
+        self.ep_rs.append(np.sum(traj.rewards))
         
+        if self.history_len == 0:
+            states = traj.states
+        else:
+            states = [ traj.get_state(t=t, seq_len=self.history_len)
+                      for t in range(len(traj)) ]
+        actions = traj.actions
+        #returns = np.array(traj.n_step_return(self.n_steps,
+        returns = np.array(traj.gamma_return( 
+                                discount=self.discount, value_index=1))
+        values = np.array([ o[1] for o in traj.others ])
+        probs = np.array([ o[0] for o in traj.others ])
+        adv = returns - values
         
-
-    def Update(self):
-        self._update_actors()
-    
-
+        adv = (adv - np.mean(adv)) / (np.std(adv) + 1e-8)
+        
+        self.model_train_queue_len += len(states)
+        self._add_batch(states, actions, probs, returns, adv)
+        
 
 def batch_objects(input_list):
     # Takes an input list of lists (of vectors), pads each list the length of
@@ -206,13 +394,25 @@ def batch_objects(input_list):
         out.append(np.pad(np.array(l,dtype=np.float32),
             ((0,max_len-len(l)),(0,0)), mode='constant'))
     return out
-
+                
 
 if __name__ == '__main__':
 
     import argparse
+    from tqdm import tqdm, trange
     import gym
     import gym_vgdl
+    
+    import warnings
+    warnings.filterwarnings("error", category=RuntimeWarning)
+    np.seterr(all='raise')
+    
+    import os
+    os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+    try:
+        os.environ["DISPLAY"]
+    except:
+        os.environ["SDL_VIDEODRIVER"] = "dummy"
     
     parser = argparse.ArgumentParser()
     parser.add_argument('--env', type=str, default='CartPole-v0',
@@ -239,7 +439,7 @@ if __name__ == '__main__':
 
     parser.add_argument('--learning_rate', type=float, default=0.00025,
                        help='Learning rate for TD updates')
-    parser.add_argument('--batch_size', type=int, default=32,
+    parser.add_argument('--batch_size', type=int, default=128,
                        help='Size of batch for Q-value updates')
     parser.add_argument('--replay_memory_size', type=int, default=100000,
                        help='Size of replay memory')
@@ -248,12 +448,9 @@ if __name__ == '__main__':
 
     parser.add_argument('--discount', type=float, default=0.99,
                        help='Discount factor')
-    parser.add_argument('--epsilon', type=float, default=0.1,
-                       help='Initial epsilon')
-    parser.add_argument('--epsilon_final', type=float, default=None,
-                       help='Final epsilon')
-    parser.add_argument('--epsilon_anneal', type=int, default=None,
-                       help='Epsilon anneal steps')
+    parser.add_argument('--n_step', type=int, default=100,
+                       help='Length of rollout')
+
 
     parser.add_argument('--save_file', type=str, default=None,
                        help='Name of save file for test results (leave None for no saving)')                 
@@ -272,19 +469,103 @@ if __name__ == '__main__':
     print('|' + '_'*col_a_width + '|' + '_'*col_b_width  + '|')
     print('')
     
-       
+    
+    # Set up env
     env_cons = lambda: gym.make(args.env)
     
     env = env_cons()
     args.num_actions = env.action_space.n
-    args.obs_size = list(env.observation_space.shape)
     args.history_len = 0
+    
+    # Set agent variables and wrap env based on chosen mode
+    mode = args.model
+    
+    if mode is None:
+        shape = env.observation_space.shape
+        if len(shape) is 3:
+            mode = 'image'
+        elif shape[0] is None:
+            mode = 'object'
+        else:
+            mode = 'vanilla'
+            
+    if mode=='DQN':
+        args.model = 'CNN'
+        args.history_len = 4
+        
+        from gym_utils.image_wrappers import ImgGreyScale, ImgResize, ImgCrop
+        def wrap_DQN(env):
+            env = ImgGreyScale(env)
+            env = ImgResize(env, 110, 84)
+            return ImgCrop(env, 84, 84)
+        env = wrap_DQN(env)
+        env_cons = lambda: wrap_DQN(gym.make(args.env))
+        
+    elif mode=='image':
+        args.model = 'CNN'
+        args.history_len = 2
+        
+        from gym_utils.image_wrappers import ImgGreyScale
+        def wrap_img(env):
+            return ImgGreyScale(env)   
+        env = wrap_img(env)
+        env_cons = lambda: wrap_img(gym.make(args.env))
+        
+    elif mode=='object':
+        args.model = 'object'
+        args.history_len = 0
+    elif mode=='vanilla':
+        args.model = 'fully connected'
+        args.history_len = 0
+    args.obs_size = list(env.observation_space.shape)
+
+    # Close env to prevent any weird race conditions   
     env.close()
     
-    agent = PPOAgent(None, env_cons, args)
     
-    for i in range(10):
-        agent._add_actor()
-    for i in range(1000000):
-        agent.Update()
+    config = tf.ConfigProto(allow_soft_placement=True)
+    config.gpu_options.allow_growth=True
+    tf.set_random_seed(args.seed)
+    
 
+    pr = cProfile.Profile()
+    with tf.Session(config=config) as sess:
+        agent = PPOAgent(sess, env_cons, args)
+
+        writer = tf.summary.FileWriter('./logs', sess.graph)
+
+
+        for i in range(32):
+            agent._add_actor()
+        time.sleep(0.1)
+        
+        
+        training_iters = 1000000
+        
+        ep_reward_last=0
+        last_update=time.time()
+        for i in trange(training_iters):
+            pr.enable()
+            agent.Train()
+            pr.disable()
+            
+            new_time=time.time()
+            if new_time > last_update + 5:
+                last_update = new_time
+            if i % 1000 == 0 and i != 0:
+                sortby = 'cumulative'
+                ps = pstats.Stats(pr).sort_stats(sortby)
+                #ps.print_stats()
+                ep_rewards = agent.ep_rs
+                num_eps = len(ep_rewards[ep_reward_last:])
+                if num_eps is not 0:
+                    avr_ep_reward = np.mean(ep_rewards[ep_reward_last:])
+                    max_ep_reward = np.max(ep_rewards[ep_reward_last:])
+                    ep_reward_last = len(ep_rewards)
+                tqdm.write("{}, {:>7}/{}it | "\
+                    .format(time.strftime("%H:%M:%S"), i, training_iters)
+                    +"{:4n} episodes, avr_ep_r: {:4.1f}, max_ep_r: {:4.1f}"\
+                    .format(num_eps, avr_ep_reward, max_ep_reward) )
+                    
+        while agent.actors:
+            agent._remove_actor()
