@@ -10,7 +10,6 @@ from Actor import RolloutActor
 from gym_utils.replay_memory import ReplayMemory
 
 
-
 class DQNAgent(RolloutActor):
     def __init__(self, session, args):
         super(DQNAgent, self).__init__()
@@ -80,14 +79,12 @@ class DQNAgent(RolloutActor):
         prepend = [None] if self.history_len == 0 else [ None, self.history_len]
         state_dim = prepend + self.obs_size
 
-
         ##################################
         
 
         ##### Build Tensorflow graph:
         ####################################################################
         
-
         self.state = tf.placeholder("float", state_dim)
         self.action = tf.placeholder('int64', [None])
         self.poststate = tf.placeholder("float", state_dim)
@@ -184,7 +181,6 @@ class DQNAgent(RolloutActor):
                         self.learning_rate).minimize(total_loss)
                         
         ##################################
-
 
         self.targ_update_op = [tf.assign(t, e) for t, e in
                                    zip(self.targ_weights, self.pred_weights)]
