@@ -5,6 +5,7 @@ Adapted from NVIDIA GA3C code
 from __future__ import division
 import numpy as np
 import cv2
+import os
 import tensorflow as tf
 from threading import Thread
 from multiprocessing import Process, Queue, Value
@@ -28,14 +29,22 @@ class PPOAgent(object):
 
         # Reinforcement learning parameters
         self.discount = args.discount
+        self.lam = args.lam
         self.n_steps = args.n_step
-
+        
         # Training parameters
+        self.train_count = args.num_epoch
+        self.batch_count = args.num_batches
+        self.batch_size = args.batch_size
+        self.learning_rate = args.learning_rate
+        
+        self.clip_ratio = args.clip_ratio
+        self.vf_penalty = args.vf_penalty
+        self.entrophy_penalty = args.entrophy_penalty
+
         self.model_type = args.model
         self.history_len = args.history_len
-        self.batch_size = args.batch_size
-        self.train_count = args.train_count
-        self.learning_rate = args.learning_rate
+        
         
         # Set up other variables:
         ##################################
@@ -50,12 +59,14 @@ class PPOAgent(object):
 
         self.num_actors = 0
         self.actors = []
+        self.num_test_actors = 0
+        self.test_actors = []
         
         self.env = env_constructor
         
         # Thread queues
-        self.trajectories_queue_size = 100
-        self.memory_queue_size = self.batch_size*self.train_count*100
+        self.trajectories_queue_size = 200
+        self.memory_queue_size = self.batch_size*self.batch_count*100
         self.prediction_queue = Queue()
         self.training_queue = Queue(self.trajectories_queue_size)
         self.testing_queue = Queue(self.trajectories_queue_size)
@@ -94,7 +105,7 @@ class PPOAgent(object):
         
         # Prediction graph
         with tf.name_scope('predict'):
-          with tf.device('gpu:0'):
+          with tf.device('cpu:0'):
             self._build_predict_graph()
             
         # Saver
@@ -112,30 +123,31 @@ class PPOAgent(object):
             tfqueuetype = tf.PaddingFIFOQueue if self.obs_size[0] == None \
                               else tf.FIFOQueue
             
-            self.model_train_queue = tfqueuetype(
-              self.memory_queue_size, # min_after_dequeue = 0,
-              dtypes=[tf.float32, tf.int64, tf.float32, tf.float32, tf.float32],
+            self.model_train_queue = tfqueuetype( self.memory_queue_size,
+              dtypes = [ tf.float32, tf.int64, tf.float32, tf.float32,
+                         tf.float32],
               shapes = [ state_dim, [], [], [], [self.n_actions] ],
-              names = [ 'state', 'action', 'advantage', 'return', 'actprob' ],
+              names = [ 'state', 'action', 'advantage', 'return', 'actprob', ],
               name = 'model_train_queue' )
             self.model_train_queue_len = 0
             
-            multi_batch_size = self.batch_size
-            batch_size = tf.placeholder_with_default(multi_batch_size, [])
-            batch = self.model_train_queue.dequeue_many(batch_size) 
             
-            self.state = batch['state']
-            self.action = batch['action']
-            self.advantage = batch['advantage']
-            self.returns = batch['return']
-            self.old_probs = batch['actprob']
+            multi_batch_size = self.batch_size * self.batch_count
+            mbs = tf.placeholder_with_default(multi_batch_size, [])
+            multi_batch = self.model_train_queue.dequeue_many(mbs) 
+            
+            self.state = multi_batch['state']
+            self.action = multi_batch['action']
+            self.advantage = multi_batch['advantage']
+            self.returns = multi_batch['return']
+            self.old_probs = multi_batch['actprob']
          
+            # Reuse same placeholders for adding items
             feed_dict = { 'state': self.state,
                           'action': self.action,
                           'advantage': self.advantage,
                           'return': self.returns,
-                          'actprob': self.old_probs,
-                        }
+                          'actprob': self.old_probs, }
             
             self.model_enqueue = self.model_train_queue.enqueue_many(
                                             feed_dict, name="queue_data")
@@ -144,42 +156,61 @@ class PPOAgent(object):
         # Naive implementation of multiple minibatch iterations
         trainer = tf.train.AdamOptimizer(learning_rate=self.learning_rate,
                                          epsilon=1e-5, name='optimizer')
+                                         
+        eps = self.clip_ratio
+        vf_coef = self.vf_penalty
+        ent_coef = self.entrophy_penalty
+                                        
         train_ops = []
         train_summaries = []
+        idx = tf.range(multi_batch_size)
+        
+        train_idx = tf.reshape(tf.random_shuffle(idx),
+                        [ self.batch_count, -1 ] )
+
         for i in range(self.train_count):
-          with tf.name_scope('iteration_'+str(i)):
-            with tf.control_dependencies(train_ops):
+         with tf.name_scope('epoch_'+str(i)):
+          
+          for b in range(self.batch_count):
+           with tf.name_scope('batch_'+str(i)):
+            
+             with tf.control_dependencies(train_ops):
+              
+              batch_idx = train_idx[b]
+              batch_state = tf.gather(self.state, batch_idx)
+              batch_action = tf.gather(self.action, batch_idx)
+              batch_old_probs = tf.gather(self.old_probs, batch_idx)
+              batch_advantage = tf.gather(self.advantage, batch_idx)
+              batch_returns = tf.gather(self.returns, batch_idx)
+              
               with tf.variable_scope(self.name + '_model', reuse=tf.AUTO_REUSE):
-                emb = self.model(self.state)
+                emb = self.model(batch_state)
                 predict = linear(tf.nn.relu(emb), self.n_actions, name='probs')
                 value = linear(tf.nn.relu(emb), 1, name='value')
               
               # From baselines code
-              eps = 0.05
-              vf_coef = 1.0
-              ent_coef = 0.01
-              
               probs = tf.nn.softmax(predict, name='normalised_probs') + 1e-5
-              action_oh = tf.one_hot(self.action, self.n_actions, 1.0, 0.0)
-              ratio = tf.reduce_sum(( probs / self.old_probs ) * \
+              action_oh = tf.one_hot(batch_action, self.n_actions, 1.0, 0.0)
+              ratio = tf.reduce_sum(( probs / batch_old_probs ) * \
                                              action_oh, axis=1, name='PPO_r')
               
-              pg_loss = -self.advantage * ratio
-              pg_loss_clipped = -self.advantage * tf.clip_by_value(ratio,
+              pg_loss = - batch_advantage * ratio
+              pg_loss_clipped = - batch_advantage * tf.clip_by_value(ratio,
                                             1.0 - eps, 1.0 + eps)
               pg_loss = tf.reduce_mean(tf.maximum(pg_loss, pg_loss_clipped),
                                         name='PPO_pg_loss')
               
-              vf_loss = .5 * tf.reduce_mean(tf.square(value - self.returns),
+              vf_loss = .5 * tf.reduce_mean(tf.square(value - batch_returns),
                                              name='PPO_vf_loss')
               
               entrophy = - tf.reduce_sum( probs * tf.log(probs), axis=1)
               ent_loss = tf.reduce_mean( entrophy, name='PPO_entrophy')
               
-              total_loss = pg_loss - ent_loss * ent_coef + vf_loss * vf_coef
+              total_loss = pg_loss + vf_loss * vf_coef - ent_loss * ent_coef
               
               train_ops.append(trainer.minimize(total_loss))
-              if i in [ 0 ]:#, self.train_count-1 ]: # don't need evey step
+              
+              if i==0 and b==0:
                 train_summaries.append(tf.summary.scalar('pg_loss', pg_loss))
                 train_summaries.append(tf.summary.scalar('vf_loss', vf_loss))
                 train_summaries.append(tf.summary.scalar('entrophy', ent_loss))
@@ -187,7 +218,6 @@ class PPOAgent(object):
                 for a in range(self.n_actions):
                   train_summaries.append(tf.summary.histogram(
                                    'action_probs/'+str(a), probs[:,a]))
-              
               
         self.train_op = tf.group(train_ops)
         self.train_summaries = tf.summary.merge(train_summaries)
@@ -232,7 +262,9 @@ class PPOAgent(object):
             self.advantage: adv,
             self.returns: ret,
         }
+        
         self.session.run(self.model_enqueue, feed_dict=feed_dict)
+        self.model_train_queue_len += len(s)
         
     def _train(self, s, a, p, adv, ret):
         if self.obs_size[0] == None:
@@ -267,13 +299,13 @@ class PPOAgent(object):
                  
 
     def Train(self):
-        while self.model_train_queue_len < self.batch_size:
-            self._pump_training_queue()
-        self.model_train_queue_len -= self.batch_size
+        while self.model_train_queue_len < self.batch_size * self.batch_count:
+            self._pump_experience_queue()
+        self.model_train_queue_len -= self.batch_size * self.batch_count
         _, summary = self.session.run([self.train_op, self.train_summaries])
         return summary
           
-    def _pump_training_queue(self):  
+    def _pump_experience_queue(self):  
         # Get training data
         traj = []
         while len(traj) == 0:
@@ -288,24 +320,25 @@ class PPOAgent(object):
                       for t in range(len(traj)) ]
         actions = traj.actions
         #returns = np.array(traj.n_step_return(self.n_steps,
-        returns = np.array(traj.gamma_return(
-                                discount=self.discount, value_index=1))
+        returns = np.array(traj.gamma_return(discount=self.discount,
+                                             gamma=self.lam, value_index=1))
         values = np.array([ o[1] for o in traj.others ])
         probs = np.array([ o[0] for o in traj.others ])
         adv = returns - values
         
         adv = (adv - np.mean(adv)) / (np.std(adv) + 1e-8)
-        
-        self.model_train_queue_len += len(states)
         self._add_batch(states, actions, probs, returns, adv)
         
-    def Save(self, save_dir):
+        
+    def Save(self, save_dir, step=None):
         # Save model to file
-        self.saver.save(self.session, save_dir + '/model.ckpt')
+        save_path = os.path.join(save_dir, 'model')
+        self.saver.save(self.session, save_path, global_step=step)
 
     def Load(self, save_dir):
         # Load model from file
-        ckpt = tf.train.get_checkpoint_state(save_dir)
+        save_path = os.path.join(save_dir, 'model')
+        ckpt = tf.train.get_checkpoint_state(save_path)
         print("Loading model from {}".format(ckpt.model_checkpoint_path))
         self.saver.restore(self.session, ckpt.model_checkpoint_path)
         
@@ -362,6 +395,7 @@ class ActorProcess(Process, RolloutActor):
             self.Update(act, reward, obs, terminal)
             
             if terminal:
+                if self.render_flag.value: time.sleep(1.0)
                 obs = env.reset()
                 self.Reset(obs)
 
@@ -420,7 +454,6 @@ def batch_objects(input_list):
 if __name__ == '__main__':
     import argparse
     import datetime
-    import os
     from tqdm import tqdm, trange
     
     import gym
@@ -448,30 +481,47 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=123,
                        help='Seed to initialise the agent with')
                        
-    parser.add_argument('--render', type=int, default=1,
-                       help='Set false to diable rendering')
+    parser.add_argument('--num_actors', type=int, default=32,
+                       help='Number of actor processes')
+    parser.add_argument('--visualize', action='store_true',
+                       help='Set True to enable visualisation')
 
     parser.add_argument('--training_iters', type=int, default=1000000,
                        help='Number of training iterations to run for')
     parser.add_argument('--display_step', type=int, default=1000,
                        help='Number of iterations between parameter prints')
+    parser.add_argument('--save_step', type=int, default=0,
+                       help='Number of steps between model checkpointing,' + \
+                       ' leave 0 for no saving')
+    parser.add_argument('--log', action='store_true',
+                       help='Set to log to tensorboard and save py files')
 
     parser.add_argument('--learning_rate', type=float, default=0.00025,
                        help='Learning rate for TD updates')
     parser.add_argument('--batch_size', type=int, default=128,
                        help='Size of batch for Q-value updates')
-    parser.add_argument('--train_count', type=int, default=10,
+    parser.add_argument('--num_epoch', type=int, default=4,
                        help='Number of training steps for each training update')
+    parser.add_argument('--num_batches', type=int, default=4,
+                       help='Number of training steps for each training update')
+                       
+    parser.add_argument('--clip_ratio', type=float, default=0.05,
+                       help='Maximum policy deviation (epsilon) allowed')
+    parser.add_argument('--vf_penalty', type=float, default=1.0,
+                       help='Weight of the value-function penalty term in ' +\
+                       'the training loss')
+    parser.add_argument('--entrophy_penalty', type=float, default=0.01,
+                       help='Weight of the entrophy penalty term in ' +\
+                       'the training loss')
 
     parser.add_argument('--discount', type=float, default=0.99,
                        help='Discount factor')
+    parser.add_argument('--lam', type=float, default=0.95,
+                       help='Lambda factor for weighting returns')
     parser.add_argument('--n_step', type=int, default=100,
                        help='Length of rollout (not used)')
 
-    parser.add_argument('--save_file', type=str, default=None,
-                       help='Name of save file for test results (leave None for no saving)')                 
-    parser.add_argument('--chk_file', type=str, default=None,
-                       help='Name of save file (leave None for no saving)')
+
                        
     args = parser.parse_args()
     
@@ -538,11 +588,16 @@ if __name__ == '__main__':
                   'history_len',
                   'learning_rate',
                   'batch_size',
-                  'train_count',
+                  'num_epoch',
+                  'num_batches',
+                  'clip_ratio',
+                  'vf_penalty',
+                  'entrophy_penalty',
                   'discount',
+                  'lam',
                  ]
     
-    timestamp = datetime.datetime.now().strftime("%y-%m-%d-%H-%M-%S")
+    timestamp = datetime.datetime.now().strftime("%y-%m-%d.%H.%M.%S")
     args.log_dir = '_'.join([timestamp]+[str(arg_dict[arg]) for arg in train_args])
     
     col_a_width = 20 ; col_b_width = 16
@@ -560,37 +615,57 @@ if __name__ == '__main__':
     with tf.Session(config=config) as sess:
         agent = PPOAgent(sess, env_cons, args)
         
+        # Data logging
         log_path = os.path.join('.', 'logs', args.log_dir)
-        writer = tf.summary.FileWriter(log_path, sess.graph)
-        ep_rs = tf.placeholder(tf.float32, [None])
-        reward_summary = tf.summary.histogram('rewards', ep_rs)
+        
+        if args.log:
+            # Create writer
+            writer = tf.summary.FileWriter(log_path, sess.graph)
+            ep_rs = tf.placeholder(tf.float32, [None])
+            reward_summary = tf.summary.histogram('rewards', ep_rs)
+        
+            # Copy source files
+            import glob
+            import shutil
+            for file in glob.glob("*.py"):
+                shutil.copy(file, log_path)
 
-        for i in range(8):
+        for i in range(args.num_actors):
             agent._add_actor()
+        if args.visualize:
+            agent._add_actor(rendering=True)
         time.sleep(0.1)
         
         training_iters = args.training_iters
         display_step = args.display_step
+        save_step = args.save_step
         ep_reward_last=0
         
         for i in trange(training_iters):
-            writer.add_summary(agent.Train(), i)
+            summary = agent.Train()
+            if args.log:
+                writer.add_summary(summary, i)
 
             if i % display_step == 0 and i != 0:
                 ep_rewards = agent.ep_rs
                 num_eps = len(ep_rewards[ep_reward_last:])
+                
                 if num_eps is not 0:
                     rewards = ep_rewards[ep_reward_last:]
                     ep_reward_last = len(ep_rewards)
                     avr_ep_reward = np.mean(rewards)
                     max_ep_reward = np.max(rewards)
-
-                    writer.add_summary(sess.run(reward_summary,
+                    if args.log:
+                        writer.add_summary(sess.run(reward_summary,
                                          feed_dict={ep_rs: rewards}), i)
+                                         
                 tqdm.write("{}, {:>7}/{}it | "\
                     .format(time.strftime("%H:%M:%S"), i, training_iters)
                     +"{:4n} episodes, avr_ep_r: {:4.1f}, max_ep_r: {:4.1f}"\
                     .format(num_eps, avr_ep_reward, max_ep_reward) )
+                    
+            if save_step != 0 and i % save_step == 0:
+                agent.Save(log_path, i)
                     
         while agent.actors:
             agent._remove_actor()
