@@ -12,16 +12,18 @@ from multiprocessing import Process, Queue, Value
 import time
 
 from Actor import RolloutActor
-from ops import linear    
-                             
+from ops import linear
+
 class PPOAgent(object):
+
+
     def __init__(self, session, env_constructor, args):
-         
+
         # Set up agent parameters:
         ##################################
 
         self.name = "PPOAgent"
-        
+
         # Environment details
         self.obs_size = args.obs_size
         self.n_actions = args.num_actions
@@ -31,21 +33,20 @@ class PPOAgent(object):
         self.discount = args.discount
         self.lam = args.lam
         self.n_steps = args.n_step
-        
+
         # Training parameters
         self.train_count = args.num_epoch
         self.batch_count = args.num_batches
         self.batch_size = args.batch_size
         self.learning_rate = args.learning_rate
-        
+
         self.clip_ratio = args.clip_ratio
         self.vf_penalty = args.vf_penalty
         self.entrophy_penalty = args.entrophy_penalty
 
         self.model_type = args.model
         self.history_len = args.history_len
-        
-        
+
         # Set up other variables:
         ##################################
 
@@ -61,21 +62,20 @@ class PPOAgent(object):
         self.actors = []
         self.num_test_actors = 0
         self.test_actors = []
-        
+
         self.env = env_constructor
-        
+
         # Thread queues
-        self.trajectories_queue_size = 200
-        self.memory_queue_size = self.batch_size*self.batch_count*100
+        self.trajectories_queue_size = 20
+        self.memory_queue_size = self.batch_size*self.batch_count*20
         self.prediction_queue = Queue()
         self.training_queue = Queue(self.trajectories_queue_size)
         self.testing_queue = Queue(self.trajectories_queue_size)
         self.experience_memory = []
-        
+
         # Predictor
         self.predictor_thread = PredictorThread( self )
-        
-        
+
         # Set up model:
         ##################################
         if self.model_type == 'CNN':
@@ -94,20 +94,19 @@ class PPOAgent(object):
         # Start up threads:
         ##################################
         self.predictor_thread.start()
-        
-        
+
     def _build_graph(self):
-    
+
         # Training graph
         with tf.name_scope('train'):
           with tf.device('gpu:0'):
             self._build_train_graph()
-        
+
         # Prediction graph
         with tf.name_scope('predict'):
           with tf.device('cpu:0'):
             self._build_predict_graph()
-            
+
         # Saver
         self.model_weights = tf.get_collection(
             tf.GraphKeys.GLOBAL_VARIABLES, scope=self.name+'_model')
@@ -115,14 +114,15 @@ class PPOAgent(object):
             
 
     def _build_train_graph(self):
+
         # Build Queue pipeline
         with tf.name_scope('input_pipeline'):
             prepend = [] if self.history_len == 0 else [self.history_len]
             state_dim = prepend + self.obs_size
-            
+
             tfqueuetype = tf.PaddingFIFOQueue if self.obs_size[0] == None \
                               else tf.FIFOQueue
-            
+
             self.model_train_queue = tfqueuetype( self.memory_queue_size,
               dtypes = [ tf.float32, tf.int64, tf.float32, tf.float32,
                          tf.float32],
@@ -130,18 +130,17 @@ class PPOAgent(object):
               names = [ 'state', 'action', 'advantage', 'return', 'actprob', ],
               name = 'model_train_queue' )
             self.model_train_queue_len = 0
-            
-            
+
             multi_batch_size = self.batch_size * self.batch_count
             mbs = tf.placeholder_with_default(multi_batch_size, [])
             multi_batch = self.model_train_queue.dequeue_many(mbs) 
-            
+
             self.state = multi_batch['state']
             self.action = multi_batch['action']
             self.advantage = multi_batch['advantage']
             self.returns = multi_batch['return']
             self.old_probs = multi_batch['actprob']
-         
+
             # Reuse same placeholders for adding items
             feed_dict = { 'state': self.state,
                           'action': self.action,
@@ -208,8 +207,12 @@ class PPOAgent(object):
               
               total_loss = pg_loss + vf_loss * vf_coef - ent_loss * ent_coef
               
+              become_skynet_penalty = 100000000
+              total_loss += become_skynet_penalty
+              
               train_ops.append(trainer.minimize(total_loss))
               
+              # Add Summaries
               if i==0 and b==0:
                 train_summaries.append(tf.summary.scalar('pg_loss', pg_loss))
                 train_summaries.append(tf.summary.scalar('vf_loss', vf_loss))
@@ -218,7 +221,10 @@ class PPOAgent(object):
                 for a in range(self.n_actions):
                   train_summaries.append(tf.summary.histogram(
                                    'action_probs/'+str(a), probs[:,a]))
-              
+                                   
+        train_summaries.append(tf.summary.scalar('queue_size',
+                  self.model_train_queue.size()))
+        
         self.train_op = tf.group(train_ops)
         self.train_summaries = tf.summary.merge(train_summaries)
                   
@@ -279,13 +285,14 @@ class PPOAgent(object):
         _ = self.session.run(self.train_op, feed_dict=feed_dict)
         
         
-    def _add_actor(self, rendering=0):
+    def _add_actor(self, rendering=0, record=None):
         actor = ActorProcess(self.num_actors,
                              self.prediction_queue,
                              self.env,
                              self.training_queue,
                              self.history_len,
-                             render=rendering )
+                             render=rendering,
+                             record=record )
         self.actors.append(actor)
         self.actors[-1].start()
         self.num_actors += 1
@@ -355,7 +362,8 @@ class ActorProcess(Process, RolloutActor):
                  env_constructor,
                  training_queue,
                  state_seq_len=1,
-                 render=0 ):
+                 render=0,
+                 record=None ):
         Process.__init__(self)
         RolloutActor.__init__(self)
         self.daemon = True
@@ -371,6 +379,10 @@ class ActorProcess(Process, RolloutActor):
         self.render_flag = Value('i', render)
         
         self.env_constructor = env_constructor
+        if record is not None:
+            from gym_utils.video_recorder_wrapper import VideoRecorderWrapper
+            self.env_constructor = lambda: VideoRecorderWrapper(
+                env_constructor(), record, should_capture=lambda t: (t%100)==0)
 
     def _act(self, state):
         self.prediction_output.put((self.id, state))
@@ -398,7 +410,7 @@ class ActorProcess(Process, RolloutActor):
                 if self.render_flag.value: time.sleep(1.0)
                 obs = env.reset()
                 self.Reset(obs)
-
+                
 
 class PredictorThread(Thread):
     def __init__(self,
@@ -485,10 +497,12 @@ if __name__ == '__main__':
                        help='Number of actor processes')
     parser.add_argument('--visualize', action='store_true',
                        help='Set True to enable visualisation')
+    parser.add_argument('--record', action='store_true',
+                       help='Set True to enable video recording')
 
     parser.add_argument('--training_iters', type=int, default=1000000,
                        help='Number of training iterations to run for')
-    parser.add_argument('--display_step', type=int, default=1000,
+    parser.add_argument('--display_step', type=int, default=100,
                        help='Number of iterations between parameter prints')
     parser.add_argument('--save_step', type=int, default=0,
                        help='Number of steps between model checkpointing,' + \
@@ -630,10 +644,11 @@ if __name__ == '__main__':
             for file in glob.glob("*.py"):
                 shutil.copy(file, log_path)
 
-        for i in range(args.num_actors):
+        # Create actors
+        for i in range(args.num_actors-1):
             agent._add_actor()
-        if args.visualize:
-            agent._add_actor(rendering=True)
+        record = log_path if args.record else None
+        agent._add_actor(rendering=args.visualize, record=record)
         time.sleep(0.1)
         
         training_iters = args.training_iters
