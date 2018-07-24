@@ -1,7 +1,8 @@
+gym
 numpy
 opencv-python>=3.4.1.15
+scikit-learn
 tensorflow
 tqdm
-gym
 -e git+https://github.com/EndingCredits/gym-utils.git#egg=gym_utils
 -e git+https://github.com/EndingCredits/gym_vgdl.git#egg=gym_vgdl
