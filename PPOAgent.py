@@ -285,6 +285,7 @@ class PPOAgent(object):
         _ = self.session.run(self.train_op, feed_dict=feed_dict)
         
         
+        
     def _add_actor(self, rendering=0, record=None):
         actor = ActorProcess(self.num_actors,
                              self.prediction_queue,
@@ -310,6 +311,7 @@ class PPOAgent(object):
             self._pump_experience_queue()
         self.model_train_queue_len -= self.batch_size * self.batch_count
         _, summary = self.session.run([self.train_op, self.train_summaries])
+        self.train_step += 1
         return summary
           
     def _pump_experience_queue(self):  
@@ -373,6 +375,7 @@ class ActorProcess(Process, RolloutActor):
         self.prediction_input = Queue(maxsize=1)
         self.training_queue = training_queue
         self.exit_flag = Value('i', 0)
+        self.should_record = Value('i', 0)
         
         self.history_len = state_seq_len
         
@@ -382,7 +385,8 @@ class ActorProcess(Process, RolloutActor):
         if record is not None:
             from gym_utils.video_recorder_wrapper import VideoRecorderWrapper
             self.env_constructor = lambda: VideoRecorderWrapper(
-                env_constructor(), record, should_capture=lambda t: (t%100)==0)
+                env_constructor(), record, should_capture=self._should_record)
+            
 
     def _act(self, state):
         self.prediction_output.put((self.id, state))
@@ -391,6 +395,12 @@ class ActorProcess(Process, RolloutActor):
 
     def _save_trajectory(self):
         self.training_queue.put(self.trajectory)
+        
+    def _should_record(self, t=0):
+        if self.should_record.value:
+            self.should_record.value = 0
+            return True
+        return False 
 
     def get_prediction_output(self):
         return self.prediction_output
@@ -490,7 +500,7 @@ if __name__ == '__main__':
     parser.add_argument('--model', type=str, default=None,
                        help='Leave None to automatically detect')
 
-    parser.add_argument('--seed', type=int, default=123,
+    parser.add_argument('--seed', type=int, default=None,
                        help='Seed to initialise the agent with')
                        
     parser.add_argument('--num_actors', type=int, default=32,
@@ -500,7 +510,7 @@ if __name__ == '__main__':
     parser.add_argument('--record', action='store_true',
                        help='Set True to enable video recording')
 
-    parser.add_argument('--training_iters', type=int, default=1000000,
+    parser.add_argument('--training_iters', type=int, default=25000,
                        help='Number of training iterations to run for')
     parser.add_argument('--display_step', type=int, default=100,
                        help='Number of iterations between parameter prints')
@@ -539,6 +549,9 @@ if __name__ == '__main__':
                        
     args = parser.parse_args()
     
+    
+    if args.seed is None:
+        args.seed = datetime.datetime.now().microsecond
 
     
     # Set up env
@@ -631,6 +644,8 @@ if __name__ == '__main__':
         
         # Data logging
         log_path = os.path.join('.', 'logs', args.log_dir)
+        results_file = os.path.join(log_path, "results.npy")
+        results = []
         
         if args.log:
             # Create writer
@@ -645,7 +660,7 @@ if __name__ == '__main__':
                 shutil.copy(file, log_path)
 
         # Create actors
-        for i in range(args.num_actors-1):
+        for step in range(args.num_actors-1):
             agent._add_actor()
         record = log_path if args.record else None
         agent._add_actor(rendering=args.visualize, record=record)
@@ -656,12 +671,12 @@ if __name__ == '__main__':
         save_step = args.save_step
         ep_reward_last=0
         
-        for i in trange(training_iters):
+        for step in trange(training_iters):
             summary = agent.Train()
             if args.log:
-                writer.add_summary(summary, i)
+                writer.add_summary(summary, step)
 
-            if i % display_step == 0 and i != 0:
+            if step % display_step == 0 and step != 0:
                 ep_rewards = agent.ep_rs
                 num_eps = len(ep_rewards[ep_reward_last:])
                 
@@ -672,15 +687,23 @@ if __name__ == '__main__':
                     max_ep_reward = np.max(rewards)
                     if args.log:
                         writer.add_summary(sess.run(reward_summary,
-                                         feed_dict={ep_rs: rewards}), i)
+                                         feed_dict={ep_rs: rewards}), step)
                                          
                 tqdm.write("{}, {:>7}/{}it | "\
                     .format(time.strftime("%H:%M:%S"), i, training_iters)
                     +"{:4n} episodes, avr_ep_r: {:4.1f}, max_ep_r: {:4.1f}"\
                     .format(num_eps, avr_ep_reward, max_ep_reward) )
                     
-            if save_step != 0 and i % save_step == 0:
-                agent.Save(log_path, i)
+                if args.log:
+                    results.append([ num_eps, avr_ep_reward, max_ep_reward ])
+                    np.save(results_file, results)
+                    
+            if (step % (display_step*5)) == 0 and args.record:
+                agent.actors[-1].should_record.value = 1
+                    
+            if save_step != 0 and step % save_step == 0:
+                agent.Save(log_path, step)
+
                     
         while agent.actors:
             agent._remove_actor()
