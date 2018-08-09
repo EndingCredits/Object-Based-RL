@@ -7,10 +7,7 @@ from gym_vgdl.list_space import list_space
 import pygame
 from pygame.locals import *
 
-try:
-    from gym_utils.frame_history_wrapper import FrameHistoryWrapper
-except:
-    from frame_history_wrapper import FrameHistoryWrapper
+from gym_utils.frame_history_wrapper import FrameHistoryWrapper
 
 from copy import deepcopy
 
@@ -51,9 +48,8 @@ class GenericObjectDetectionWrapper(Wrapper):
         if type(self.base_env) is VGDLEnv:
             pygame.font.init()
             self.font = pygame.font.SysFont(None, 48)
-        elif type(self.base_env) is AtariEnv:
-            from gym.envs.classic_control import rendering
-            self.viewer = rendering.SimpleImageViewer()
+        self.viewer = None
+            
 
         self.prev_frame_objects = []
         self.object_class_examples = []
@@ -74,12 +70,11 @@ class GenericObjectDetectionWrapper(Wrapper):
     def _get_state(self):
         objects = self._detect_objects(self.frames[-1])
         self.prev_frame_objects = objects
-        self._draw_bb(objects)
 
         return objects if objects else [np.zeros(self.num_attributes)]
 
 
-    def _draw_bb(self, objects, draw_ground_truth=True):
+    def _draw_bb(self, objects, draw_ground_truth=True, return_img=False):
         if len(self.colors) < len(self.object_class_examples):
             for idx in range(len(self.colors),len(self.object_class_examples)):
                 self.colors.append(list(np.random.choice(range(256), size=3)))
@@ -87,8 +82,9 @@ class GenericObjectDetectionWrapper(Wrapper):
         if type(self.base_env) is VGDLEnv:
 
             # Scale display
+            display = pygame.display.get_surface()
             pygame.transform.scale(self.base_env.screen,
-                self.base_env.display_size, self.base_env.display)
+                self.base_env.display_size, display)
 
             # Draw bounding boxes
             scale_size = self.base_env.zoom
@@ -99,7 +95,7 @@ class GenericObjectDetectionWrapper(Wrapper):
                     y = box[1] * scale_size
                     width = box[2] * scale_size
                     height = box[3] * scale_size
-                    pygame.draw.rect(self.base_env.display,
+                    pygame.draw.rect(display,
                         box_colors[ind], (x, y, width, height), thickness)
 
             # Ground truth
@@ -108,7 +104,7 @@ class GenericObjectDetectionWrapper(Wrapper):
                 box_colors = [ (255,0,0) for _ in range(len(true_boxes)) ]
                 draw_boxes(true_boxes, box_colors, 1)
                 text = self.font.render(str(len(true_boxes)), True, (255,0,0))
-                self.base_env.display.blit(text, text.get_rect().move(0,30))
+                display.blit(text, text.get_rect().move(0,30))
 
             # Detected truth
             bounding_boxes = [ obj[0:4] for obj in objects ]
@@ -117,9 +113,13 @@ class GenericObjectDetectionWrapper(Wrapper):
 
             #Display text
             text = self.font.render(str(len(objects)), True, (0,255,0))
-            self.base_env.display.blit(text, text.get_rect())
+            display.blit(text, text.get_rect())
 
             pygame.display.update()
+            if return_img:
+                return np.flipud(np.rot90(pygame.surfarray.array3d(
+                   display).astype(np.uint8)))
+            
 
         elif type(self.base_env) is AtariEnv:
             #TODO: implement for ALE
@@ -127,7 +127,7 @@ class GenericObjectDetectionWrapper(Wrapper):
 
             def draw_boxes(boxes, box_colors, thickness=1):
                 for idx, box in enumerate(boxes):
-                    c = np.array[box_colors[idx]]
+                    c = np.array(box_colors[idx])
                     img[box[1], box[0]:box[0] + box[2]] = c
                     img[box[1] + box[3]-1, box[0]:box[0] + box[2]] = c
                     img[box[1]:box[1] + box[3], box[0]] = c
@@ -138,7 +138,12 @@ class GenericObjectDetectionWrapper(Wrapper):
             box_colors = [ self.colors[obj[4]] for obj in objects ]
             draw_boxes(bounding_boxes, box_colors, 2)
 
+            if self.viewer is None:
+                from gym.envs.classic_control import rendering
+                self.viewer = rendering.SimpleImageViewer()
             self.viewer.imshow(img)
+            if return_img:
+                return img
 
 
     def _detect_objects(self, frame):
@@ -148,16 +153,19 @@ class GenericObjectDetectionWrapper(Wrapper):
         return objects
 
 
-    def render(self):
-        #TODO: handle this more gracefully
-        pass
+    def render(self, mode='human', close=False):
+        if mode == 'rgb_array':
+            return self._draw_bb(self.prev_frame_objects, return_img=True)
+        else:
+            self._draw_bb(self.prev_frame_objects)
+            return True
 
 
 
 class TestObjectDetectionWrapper(GenericObjectDetectionWrapper):
 
     # Stores last 2 frames
-    history_length = 2
+    history_length = 1
 
     # Total number of object attributes inc position etc
     num_attributes = 6

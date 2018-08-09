@@ -553,7 +553,7 @@ if __name__ == '__main__':
     if args.seed is None:
         args.seed = datetime.datetime.now().microsecond
 
-    
+
     # Set up env
     env_cons = lambda: gym.make(args.env)
     
@@ -564,6 +564,7 @@ if __name__ == '__main__':
     # Set agent variables and wrap env based on chosen mode
     mode = args.model
     
+    # Autodetect
     if mode is None:
         shape = env.observation_space.shape
         if len(shape) is 3:
@@ -594,6 +595,13 @@ if __name__ == '__main__':
             return ImgGreyScale(env)   
         env = wrap_img(env)
         env_cons = lambda: wrap_img(gym.make(args.env))
+        
+    elif mode=='objdetect':
+        args.model = 'object'
+        args.history_len = 0
+        from object_detection_wrappers import TestObjectDetectionWrapper
+        env = TestObjectDetectionWrapper(env)
+        env_cons = lambda: TestObjectDetectionWrapper(gym.make(args.env))
         
     elif mode=='object':
         args.model = 'object'
