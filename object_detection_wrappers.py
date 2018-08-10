@@ -74,7 +74,7 @@ class GenericObjectDetectionWrapper(Wrapper):
         return objects if objects else [np.zeros(self.num_attributes)]
 
 
-    def _draw_bb(self, objects, draw_ground_truth=True, return_img=False):
+    def _draw_bb(self, objects, draw_ground_truth=True, img_only=False):
         if len(self.colors) < len(self.object_class_examples):
             for idx in range(len(self.colors),len(self.object_class_examples)):
                 self.colors.append(list(np.random.choice(range(256), size=3)))
@@ -116,7 +116,7 @@ class GenericObjectDetectionWrapper(Wrapper):
             display.blit(text, text.get_rect())
 
             pygame.display.update()
-            if return_img:
+            if img_only:
                 return np.flipud(np.rot90(pygame.surfarray.array3d(
                    display).astype(np.uint8)))
             
@@ -138,12 +138,14 @@ class GenericObjectDetectionWrapper(Wrapper):
             box_colors = [ self.colors[obj[4]] for obj in objects ]
             draw_boxes(bounding_boxes, box_colors, 2)
 
-            if self.viewer is None:
-                from gym.envs.classic_control import rendering
-                self.viewer = rendering.SimpleImageViewer()
-            self.viewer.imshow(img)
-            if return_img:
+            
+            if img_only:
                 return img
+            else:
+                if self.viewer is None:
+                    from gym.envs.classic_control import rendering
+                    self.viewer = rendering.SimpleImageViewer()
+                self.viewer.imshow(img)
 
 
     def _detect_objects(self, frame):
@@ -155,7 +157,7 @@ class GenericObjectDetectionWrapper(Wrapper):
 
     def render(self, mode='human', close=False):
         if mode == 'rgb_array':
-            return self._draw_bb(self.prev_frame_objects, return_img=True)
+            return self._draw_bb(self.prev_frame_objects, img_only=True)
         else:
             self._draw_bb(self.prev_frame_objects)
             return True
