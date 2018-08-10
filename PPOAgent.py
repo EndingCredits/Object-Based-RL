@@ -556,6 +556,7 @@ if __name__ == '__main__':
 
     # Set up env
     env_cons = lambda: gym.make(args.env)
+    wrappers = []
     
     env = env_cons()
     args.num_actions = env.action_space.n
@@ -564,7 +565,22 @@ if __name__ == '__main__':
     # Set agent variables and wrap env based on chosen mode
     mode = args.model
     
-    # Autodetect
+
+    # Prewrapping for certain envs
+    from gym.envs.atari.atari_env import AtariEnv
+    if type(env.unwrapped) is AtariEnv:
+        from gym_utils.third_party.atari_wrappers import MaxAndSkipEnv
+        from gym_utils.third_party.atari_wrappers import ClipRewardEnv
+        from gym_utils.third_party.atari_wrappers import EpisodicLifeEnv
+        def wrap_atari(env):
+            env = MaxAndSkipEnv(env)
+            env = ClipRewardEnv(env)
+            env = EpisodicLifeEnv(env)
+            return env
+        env = wrap_atari(env)
+        wrappers.append(wrap_atari)
+        
+    # Autodetect observation type
     if mode is None:
         shape = env.observation_space.shape
         if len(shape) is 3:
@@ -584,8 +600,8 @@ if __name__ == '__main__':
             env = ImgResize(env, 110, 84)
             return ImgCrop(env, 84, 84)
         env = wrap_DQN(env)
-        env_cons = lambda: wrap_DQN(gym.make(args.env))
-        
+        wrappers.append(wrap_DQN)
+
     elif mode=='image':
         args.model = 'CNN'
         args.history_len = 2
@@ -594,14 +610,14 @@ if __name__ == '__main__':
         def wrap_img(env):
             return ImgGreyScale(env)   
         env = wrap_img(env)
-        env_cons = lambda: wrap_img(gym.make(args.env))
+        wrappers.append(wrap_img)
         
     elif mode=='objdetect':
         args.model = 'object'
         args.history_len = 0
         from object_detection_wrappers import TestObjectDetectionWrapper
         env = TestObjectDetectionWrapper(env)
-        env_cons = lambda: TestObjectDetectionWrapper(gym.make(args.env))
+        wrappers.append(TestObjectDetectionWrapper)
         
     elif mode=='object':
         args.model = 'object'
@@ -614,7 +630,13 @@ if __name__ == '__main__':
     # Close env to prevent any weird thread collisions  
     env.close()
     
-    
+    def wrap_env(env, wrappers):
+        for wrapper in wrappers:
+            env = wrapper(env)
+        return env
+        
+    wrapped_env = lambda: wrap_env(env_cons(), wrappers)
+       
     
     arg_dict = vars(args)
     train_args = [
@@ -648,7 +670,7 @@ if __name__ == '__main__':
     config.gpu_options.allow_growth=True
     tf.set_random_seed(args.seed)
     with tf.Session(config=config) as sess:
-        agent = PPOAgent(sess, env_cons, args)
+        agent = PPOAgent(sess, wrapped_env, args)
         
         # Data logging
         log_path = os.path.join('.', 'logs', args.log_dir)
@@ -698,7 +720,7 @@ if __name__ == '__main__':
                                          feed_dict={ep_rs: rewards}), step)
                                          
                 tqdm.write("{}, {:>7}/{}it | "\
-                    .format(time.strftime("%H:%M:%S"), i, training_iters)
+                    .format(time.strftime("%H:%M:%S"), step, training_iters)
                     +"{:4n} episodes, avr_ep_r: {:4.1f}, max_ep_r: {:4.1f}"\
                     .format(num_eps, avr_ep_reward, max_ep_reward) )
                     
