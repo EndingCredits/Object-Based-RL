@@ -14,7 +14,6 @@ from copy import deepcopy
 import cv2
 import numpy as np
 from scipy.spatial import distance
-from sklearn.cluster import DBSCAN
 
 
 class GenericObjectDetectionWrapper(Wrapper):
@@ -49,10 +48,9 @@ class GenericObjectDetectionWrapper(Wrapper):
             pygame.font.init()
             self.font = pygame.font.SysFont(None, 48)
         self.viewer = None
-            
+
 
         self.prev_frame_objects = []
-        self.object_class_examples = []
         self.colors = []
 
 
@@ -75,10 +73,6 @@ class GenericObjectDetectionWrapper(Wrapper):
 
 
     def _draw_bb(self, objects, draw_ground_truth=True, img_only=False):
-        if len(self.colors) < len(self.object_class_examples):
-            for idx in range(len(self.colors),len(self.object_class_examples)):
-                self.colors.append(list(np.random.choice(range(256), size=3)))
-
         if type(self.base_env) is VGDLEnv:
 
             # Scale display
@@ -108,7 +102,7 @@ class GenericObjectDetectionWrapper(Wrapper):
 
             # Detected truth
             bounding_boxes = [ obj[0:4] for obj in objects ]
-            box_colors = [ self.colors[obj[4]] for obj in objects ]
+            box_colors = [ (0,255,0) for _ in range(len(objects)) ]
             draw_boxes(bounding_boxes, box_colors, 2)
 
             #Display text
@@ -119,7 +113,7 @@ class GenericObjectDetectionWrapper(Wrapper):
             if img_only:
                 return np.flipud(np.rot90(pygame.surfarray.array3d(
                    display).astype(np.uint8)))
-            
+
 
         elif type(self.base_env) is AtariEnv:
             #TODO: implement for ALE
@@ -135,10 +129,9 @@ class GenericObjectDetectionWrapper(Wrapper):
 
             # Detected truth
             bounding_boxes = [ obj[0:4] for obj in objects ]
-            box_colors = [ self.colors[obj[4]] for obj in objects ]
+            box_colors = [ (0,255,0) for _ in range(len(objects)) ]
             draw_boxes(bounding_boxes, box_colors, 2)
 
-            
             if img_only:
                 return img
             else:
@@ -170,9 +163,12 @@ class TestObjectDetectionWrapper(GenericObjectDetectionWrapper):
     history_length = 1
 
     # Total number of object attributes inc position etc
-    num_attributes = 6
+    num_attributes = 9
 
     ARC_THRESHOLD = 10
+
+    OBJECT_MATCH_MAX_DISTANCES = [1, 1, *([5]*3)]
+
 
     def __init__(self, env):
         assert env is not None
@@ -200,59 +196,41 @@ class TestObjectDetectionWrapper(GenericObjectDetectionWrapper):
             epsilon = 0.00*cv2.arcLength(cnt,True)
             approx.append(cv2.approxPolyDP(cnt,epsilon,True))
 
-
-        cont_classes_labels = self._cluster_contours(contours, img)
         objects = []
         for idx, cont in enumerate(approx):
             x,y,w,h = cv2.boundingRect(cont)
-            objclass = cont_classes_labels[idx]
-            velocity = self._get_object_velocity(cont, objclass)
-            objects.append([x, y, w, h, objclass, velocity])
+            colors = self._get_object_colors(cont, img)
+            velocity = self._get_object_velocity(x, y, w, h, colors)
+            objects.append([x, y, w, h, *colors, *velocity])
 
         return objects
 
 
-    def _cluster_contours(self, contours, img):
-        objs = []
-        for cont in contours:
-            x,y,w,h = cv2.boundingRect(cont)
-            mask = np.zeros(img.shape[:2], dtype="uint8")
-            cv2.drawContours(mask, [cont], -1, 255, -1)
-            mask = cv2.erode(mask, None, iterations=2)
-            mean_colour = cv2.mean(img, mask=mask)[:3]
-            objs.append([w, h] + list(mean_colour)) # need to normalise the values
-
-        objs = [y for x in self.object_class_examples for y in x] + objs # add previous objects to ensure consistent classes
-        labels = DBSCAN(min_samples=1, eps=10).fit_predict(objs)
-        self._store_objects_by_class(objs, labels)
-
-        return labels[-len(contours):] # get the labels only of the current contours
+    def _get_object_colors(self, contour, img):
+        mask = np.zeros(img.shape[:2], dtype="uint8")
+        cv2.drawContours(mask, [contour], -1, 255, -1)
+        mask = cv2.erode(mask, None, iterations=2)
+        return  cv2.mean(img, mask=mask)[:3]
 
 
-    def _store_objects_by_class(self, objs, labels):
-        objs_sorted = [x for _,x in sorted(zip(labels,objs))]
-        labels_sorted = sorted(labels)
-        obj_cl = []
+    # get closest boxes from last frame
+    def _get_object_velocity(self, x, y, w, h, colors):
+        same_class_objects = [o for o in self.prev_frame_objects
+                              if self._get_object_difference(o, w, h, colors) <
+                              TestObjectDetectionWrapper.OBJECT_MATCH_MAX_DISTANCES ]
+        if len(same_class_objects) == 0:
+            return 0, 0
 
-        for idx, obj in enumerate(objs_sorted):
-            if len(self.object_class_examples) <= labels_sorted[idx]:
-                self.object_class_examples.append([obj])
-            else:
-                self.object_class_examples[labels_sorted[idx]].append(obj)
-        self.object_class_examples = [examples[-5:] for examples in
-                                      self.object_class_examples]
+        min_object = min(same_class_objects,
+                         key=lambda obj: distance.euclidean((obj[0], obj[1]), (x, y)))
+
+        return min_object[0] - x, min_object[1] - y
 
 
-    def _get_object_velocity(self, contour, objclass):
-        x,y,w,h = cv2.boundingRect(contour)
-
-        # get closest boxes from last frame
-        distances_between = [ distance.euclidean((obj[0], obj[1]), (x,y))
-                             for obj in self.prev_frame_objects
-                             if objclass == obj[4] ]
-
-        # velocity is calculated as the difference between this x,y and last frames x,y
-        return min(distances_between) if len(distances_between) != 0 else 0
+    def _get_object_difference(self, obj, w, h, colors):
+        return abs(np.array([np.array(obj[2]) - w,
+                             np.array(obj[3]) - h,
+                             *(np.array(obj[4:7]) - np.array(colors)) ])).tolist()
 
 
     def _get_object_features(self, box, boxes): # box = [x, y, width, height]

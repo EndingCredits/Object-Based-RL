@@ -1,3 +1,4 @@
+atari-py
 gym
 numpy
 opencv-python>=3.4.1.15
