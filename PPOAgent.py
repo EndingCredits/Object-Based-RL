@@ -33,6 +33,11 @@ class PPOAgent(object):
         self.discount = args.discount
         self.lam = args.lam
         self.n_steps = args.n_step
+        
+        # Double Q
+        # Addressing Function Approximation Error in Actor-Critic Methods
+        #     - Fujimoto et al.
+        self.use_double_q = args.double_critic
 
         # Training parameters
         self.train_count = args.num_epoch
@@ -95,6 +100,7 @@ class PPOAgent(object):
         ##################################
         self.predictor_thread.start()
 
+
     def _build_graph(self):
 
         # Training graph
@@ -155,18 +161,27 @@ class PPOAgent(object):
         # Naive implementation of multiple minibatch iterations
         trainer = tf.train.AdamOptimizer(learning_rate=self.learning_rate,
                                          epsilon=1e-5, name='optimizer')
-                                         
+        
+        # rename of variables for convenience                         
         eps = self.clip_ratio
         vf_coef = self.vf_penalty
         ent_coef = self.entrophy_penalty
                                         
-        train_ops = []
-        train_summaries = []
-        idx = tf.range(multi_batch_size)
         
-        train_idx = tf.reshape(tf.random_shuffle(idx),
-                        [ self.batch_count, -1 ] )
+        train_summaries = []
+        train_summaries.append(tf.summary.histogram('returns', self.returns)) 
+        train_summaries.append(tf.summary.scalar('return', 
+                    tf.reduce_mean(self.returns)))
+        train_summaries.append(tf.summary.histogram('advantages',
+                    self.advantage)) 
+        train_summaries.append(tf.summary.scalar('advantage', 
+                    tf.reduce_mean(self.advantage))) 
+        
 
+        # Create train graph for N epochs of B batches
+        train_ops = []
+        idx = tf.range(multi_batch_size)
+        train_idx = tf.reshape(tf.random_shuffle(idx), [self.batch_count, -1])
         for i in range(self.train_count):
          with tf.name_scope('epoch_'+str(i)):
           
@@ -186,25 +201,35 @@ class PPOAgent(object):
                 emb = self.model(batch_state)
                 predict = linear(tf.nn.relu(emb), self.n_actions, name='probs')
                 value = linear(tf.nn.relu(emb), 1, name='value')
+                if self.use_double_q: # add second critic
+                  value2 = linear(tf.nn.relu(emb), 1, name='value2')
               
-              # From baselines code
+              # From baselines code:
+              
+              # Policy gradient loss, with PPO constraint
               probs = tf.nn.softmax(predict, name='normalised_probs') + 1e-5
               action_oh = tf.one_hot(batch_action, self.n_actions, 1.0, 0.0)
               ratio = tf.reduce_sum(( probs / batch_old_probs ) * \
                                              action_oh, axis=1, name='PPO_r')
-              
               pg_loss = - batch_advantage * ratio
               pg_loss_clipped = - batch_advantage * tf.clip_by_value(ratio,
                                             1.0 - eps, 1.0 + eps)
               pg_loss = tf.reduce_mean(tf.maximum(pg_loss, pg_loss_clipped),
                                         name='PPO_pg_loss')
               
+              # Critic (value function) loss
               vf_loss = .5 * tf.reduce_mean(tf.square(value - batch_returns),
                                              name='PPO_vf_loss')
+                                             
+              if self.use_double_q: # loss for second critic
+                  vf_loss += .5 * tf.reduce_mean(
+                      tf.square(value2 - batch_returns), name='PPO_vf2_loss')
               
+              # Entrophy loss
               entrophy = - tf.reduce_sum( probs * tf.log(probs), axis=1)
               ent_loss = tf.reduce_mean( entrophy, name='PPO_entrophy')
               
+              # Total loss
               total_loss = pg_loss + vf_loss * vf_coef - ent_loss * ent_coef
               
               become_skynet_penalty = 100000000
@@ -213,19 +238,23 @@ class PPOAgent(object):
               train_ops.append(trainer.minimize(total_loss))
               
               # Add Summaries
-              if i==0 and b==0:
+              if i==0 and b==0: # only if first batch of last iter
                 train_summaries.append(tf.summary.scalar('pg_loss', pg_loss))
                 train_summaries.append(tf.summary.scalar('vf_loss', vf_loss))
                 train_summaries.append(tf.summary.scalar('entrophy', ent_loss))
-                train_summaries.append(tf.summary.histogram('value', value))         
+                train_summaries.append(tf.summary.histogram('values', value)) 
+                train_summaries.append(tf.summary.scalar('value', 
+                    tf.reduce_mean(value)))          
                 for a in range(self.n_actions):
+                  train_summaries.append(tf.summary.scalar(
+                      'action_prob/'+str(a), tf.reduce_mean(probs[:,a])))
                   train_summaries.append(tf.summary.histogram(
                                    'action_probs/'+str(a), probs[:,a]))
                                    
+        self.train_op = tf.group(train_ops)    
+              
         train_summaries.append(tf.summary.scalar('queue_size',
                   self.model_train_queue.size()))
-        
-        self.train_op = tf.group(train_ops)
         self.train_summaries = tf.summary.merge(train_summaries)
                   
                   
@@ -240,9 +269,13 @@ class PPOAgent(object):
           emb = self.model(self.state_pred)
           predict = linear(tf.nn.relu(emb), self.n_actions, name='probs')
           value = linear(tf.nn.relu(emb), 1, name='value')
+          if self.use_double_q:
+            value2 = linear(tf.nn.relu(emb), 1, name='value2')
         
         self.action_probs = tf.nn.softmax(predict) + 1e-5
         self.value = tf.squeeze(value, axis=1)
+        if self.use_double_q: # Return minimum of both critics for target
+            self.value = tf.minimum(self.value, tf.squeeze(value2, axis=1))
 
         
     def _get_action(self, state):
@@ -258,7 +291,7 @@ class PPOAgent(object):
             print(probs)
         return act, probs, value
         
-    def _add_batch(self, s, a, p, adv, ret):
+    def _add_batch(self, s, a, p, ret, adv):
         if self.obs_size[0] == None:
             s = batch_objects(s)
         feed_dict = {
@@ -272,7 +305,7 @@ class PPOAgent(object):
         self.session.run(self.model_enqueue, feed_dict=feed_dict)
         self.model_train_queue_len += len(s)
         
-    def _train(self, s, a, p, adv, ret):
+    def _train(self, s, a, p, ret, adv):
         if self.obs_size[0] == None:
             s = batch_objects(s)
         feed_dict = {
@@ -544,6 +577,9 @@ if __name__ == '__main__':
                        help='Lambda factor for weighting returns')
     parser.add_argument('--n_step', type=int, default=100,
                        help='Length of rollout (not used)')
+                       
+    parser.add_argument('--double_critic', action='store_true',
+                       help='Set to use double critic')
 
 
                        
@@ -652,6 +688,7 @@ if __name__ == '__main__':
                   'entrophy_penalty',
                   'discount',
                   'lam',
+                  'double_critic',
                  ]
     
     timestamp = datetime.datetime.now().strftime("%y-%m-%d.%H.%M.%S")
@@ -681,7 +718,9 @@ if __name__ == '__main__':
             # Create writer
             writer = tf.summary.FileWriter(log_path, sess.graph)
             ep_rs = tf.placeholder(tf.float32, [None])
-            reward_summary = tf.summary.histogram('rewards', ep_rs)
+            reward_summary = tf.summary.merge(
+                [ tf.summary.histogram('rewards', ep_rs), 
+                  tf.summary.scalar('mean_rewards', tf.reduce_mean(ep_rs)), ] )
         
             # Copy source files
             import glob
