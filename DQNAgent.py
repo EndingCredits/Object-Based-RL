@@ -611,19 +611,19 @@ if __name__ == '__main__':
                     ep_reward_last = len(ep_rewards)
                     avr_ep_reward = np.mean(rewards)
                     max_ep_reward = np.max(rewards)
+                    std = np.std(rewards)
                     if args.log:
                         writer.add_summary(sess.run(reward_summary,
                                          feed_dict={ep_rs: rewards}), step)
+                        results.append([ num_eps, avr_ep_reward,
+                                         std, max_ep_reward ])
+                        np.save(results_file, results)
                                          
                 tqdm.write("{}, {:>7}/{}it | "\
                     .format(time.strftime("%H:%M:%S"), step, training_iters)
                     +"{:4n} episodes, avr_ep_r: {:4.1f}, max_ep_r: {:4.1f}"\
                     .format(num_eps, avr_ep_reward, max_ep_reward) )
-                    
-                if args.log:
-                    results.append([ num_eps, avr_ep_reward, max_ep_reward ])
-                    np.save(results_file, results)
-                    
+
                     
             if save_step != 0 and step % save_step == 0:
                 agent.Save(log_path, step)
