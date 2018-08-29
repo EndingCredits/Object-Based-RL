@@ -32,7 +32,7 @@ class DQNAgent(RolloutActor):
         self.epsilon_anneal = args.epsilon_anneal
         
         # Double Q
-        self.use_double_q = False
+        self.use_double_q = args.double_q
         
         # Contracted bellman updates
         self.use_contracted_bellman = False
@@ -153,8 +153,9 @@ class DQNAgent(RolloutActor):
         if self.use_double_q:
             # Predict action with current network
             pred_action = tf.argmax(self.pred_post_qs, axis=1)
+            pred_a_oh = tf.one_hot(pred_action, self.n_actions, 1.0, 0.0)
             # Get value of action from target network
-            V_t1 = self.target_post_qs[pred_action]
+            V_t1 = tf.reduce_sum(self.target_post_qs * pred_a_oh, axis=1)
         else:
             V_t1 = tf.reduce_max(self.target_post_qs, axis=1)
 
@@ -396,7 +397,9 @@ if __name__ == '__main__':
     parser.add_argument('--learn_step', type=int, default=4,
                        help='Number of steps in-between learning updates')
 
-
+    parser.add_argument('--double_q', action='store_true',
+                       help='Use current network to select action for target')
+                       
     parser.add_argument('--discount', type=float, default=0.99,
                        help='Discount factor')
     parser.add_argument('--epsilon', type=float, default=0.1,

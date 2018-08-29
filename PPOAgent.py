@@ -305,17 +305,17 @@ class PPOAgent(object):
         self.session.run(self.model_enqueue, feed_dict=feed_dict)
         self.model_train_queue_len += len(s)
         
-    def _train(self, s, a, p, ret, adv):
-        if self.obs_size[0] == None:
-            s = batch_objects(s)
-        feed_dict = {
-            self.state: s,
-            self.action: a,
-            self.old_probs: p,
-            self.advantage: adv,
-            self.returns: ret,
-        }
-        _ = self.session.run(self.train_op, feed_dict=feed_dict)
+    #def _train(self, s, a, p, ret, adv):
+    #    if self.obs_size[0] == None:
+    #        s = batch_objects(s)
+    #    feed_dict = {
+    #        self.state: s,
+    #        self.action: a,
+    #        self.old_probs: p,
+    #        self.advantage: adv,
+    #        self.returns: ret,
+    #    }
+    #    _ = self.session.run(self.train_op, feed_dict=feed_dict)
         
         
         
