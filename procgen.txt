@@ -1,0 +1,17 @@
+BasicGame block_size=5
+    SpriteSet
+        background > Immovable img=newset/floor2 hidden=True
+        base       > Immovable color="WHITE" img=newset/block1
+        avatar     > MovingAvatar color="BLUE" img=oryx/knight1
+
+    LevelMapping
+        . > background
+        X > background base
+        A > background avatar
+
+    TerminationSet
+        SpriteCounter stype=base limit=0 win=True
+
+    InteractionSet
+        avatar EOS  > stepBack
+        base avatar > killSprite scoreChange=1

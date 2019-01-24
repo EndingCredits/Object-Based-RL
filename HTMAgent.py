@@ -9,6 +9,9 @@ from ops import linear
 from Actor import RolloutActor
 from gym_utils.replay_memory import ReplayMemory
 
+from nupic.algorithms.spatial_pooler import SpatialPooler
+from nupic.encoders.random_distributed_scalar import RandomDistributedScalarEncoder
+from nupic.encoders.coordinate import CoordinateEncoder
 
 class DQNAgent(RolloutActor):
     def __init__(self, session, args):
@@ -49,6 +52,11 @@ class DQNAgent(RolloutActor):
         self.learning_rate = args.learning_rate
         self.learn_step = args.learn_step
         self.target_update_step = 1000
+        
+        # Overrides
+        self.emb_size = 256
+        self.model_type = 'fully connected'
+        self.obs_size = [ self.emb_size ] 
 
         # Set up other variables:
         ##################################
@@ -63,6 +71,9 @@ class DQNAgent(RolloutActor):
 
         # Replay Memory
         self.memory = ReplayMemory(self.memory_size, self.obs_size)
+        
+        # HTM stuff
+        self._buildHTMEncoders()
 
         ##################################
 
@@ -303,10 +314,16 @@ class DQNAgent(RolloutActor):
 
 
     def Reset(self, obs, train=True):
+        obs = self._htm_oen(obs)
         super(DQNAgent, self).Reset(obs)
 
         # Resets agent for start of new episode
         self.training = train
+        
+    def Update(self, action, reward, obs, terminal):
+        obs = self._htm_oen(obs)
+        super(DQNAgent, self).Update(action, reward, obs, terminal)
+        
 
     def GetAction(self):
         action = super(DQNAgent, self).GetAction()
@@ -325,7 +342,50 @@ class DQNAgent(RolloutActor):
 
         # Also need to initialise target network
         self.session.run(self.targ_update_op)
-
+        
+    def _buildHTMEncoders(self):
+    
+        self.pos_encoder = CoordinateEncoder(w=7, n=self.emb_size)
+        self.num_encoder = RandomDistributedScalarEncoder(w=7, n=self.emb_size,
+                               resolution=0.1, offset=2.5)
+        
+        self.sp1 = SpatialPooler(inputDimensions=(self.emb_size,),
+                                 columnDimensions=(self.emb_size,),
+                                 potentialRadius=self.emb_size,
+                                 numActiveColumnsPerInhArea=4,
+                                 globalInhibition=True,
+                                 synPermActiveInc=0.0,
+                                 potentialPct=1.0 )
+        
+        self.sp_out = SpatialPooler(inputDimensions=(self.emb_size,),
+                                 columnDimensions=(self.emb_size,),
+                                 potentialRadius=self.emb_size,
+                                 numActiveColumnsPerInhArea=4,
+                                 globalInhibition=True,
+                                 synPermActiveInc=0.0,
+                                 potentialPct=1.0 )
+                                 
+                                 
+                                     
+    def _embed_obj(self, obj):
+        pos_emb = self.pos_encoder.encode((np.array(obj[:2], dtype="int"), 1))
+        return pos_emb#np.zeros((self.emb_size,), dtype="int")
+    
+    def _htm_oen(self, obj_list):
+        num_obj = len(obj_list)
+        
+        embed_rep = np.zeros((num_obj, self.emb_size), dtype="int")
+        
+        for i, obj in enumerate(obj_list):
+            obj_rep = self._embed_obj(obj)
+            self.sp1.compute(obj_rep, learn=True, activeArray=embed_rep[i])
+        set_rep = np.any(embed_rep, axis=0).astype("int")
+        
+        out_rep = np.zeros((self.emb_size,), dtype="int")
+        self.sp_out.compute(set_rep, learn=True, activeArray=out_rep)
+        return out_rep
+        
+        
 
 def batch_objects(input_list):
     # Takes an input list of lists (of vectors), pads each list the length of
@@ -340,6 +400,9 @@ def batch_objects(input_list):
         out.append(np.pad(np.array(l,dtype=np.float32),
             ((0,max_len-len(l)),(0,0)), mode='constant'))
     return out
+
+
+
     
     
 if __name__ == '__main__':
@@ -350,8 +413,6 @@ if __name__ == '__main__':
     
     import gym
     import gym_vgdl
-
-    import procgen_env
     
     # Uncomment to throw numpy warnings
     #import warnings
@@ -436,6 +497,7 @@ if __name__ == '__main__':
     
 
     # Prewrapping for certain envs
+    """
     from gym.envs.atari.atari_env import AtariEnv
     if type(env.unwrapped) is AtariEnv:
         from gym_utils.third_party.atari_wrappers import MaxAndSkipEnv
@@ -448,6 +510,7 @@ if __name__ == '__main__':
             return env
         env = wrap_atari(env)
         wrappers.append(wrap_atari)
+    """
         
     # Autodetect observation type
     if mode is None:
@@ -573,7 +636,6 @@ if __name__ == '__main__':
         
         # Start agent
         state = env.reset()
-        print(state)
         agent.Reset(state)
         ep_r = 0
         ep_rewards = []

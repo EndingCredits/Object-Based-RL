@@ -90,8 +90,10 @@ class PPOAgent(object):
             from networks import fully_connected_network
             self.model = fully_connected_network
         elif self.model_type == 'object':
-            from networks import object_embedding_network2
-            self.model = object_embedding_network2
+            #from networks import object_embedding_network2
+            #self.model = object_embedding_network2
+            from networks import relational_object_network
+            self.model = relational_object_network
 
         self._build_graph()
         self.session.run(tf.global_variables_initializer())
@@ -203,6 +205,8 @@ class PPOAgent(object):
                 value = linear(tf.nn.relu(emb), 1, name='value')
                 if self.use_double_q: # add second critic
                   value2 = linear(tf.nn.relu(emb), 1, name='value2')
+
+                reward_pred = linear(tf.nn.relu(emb), 1, name='rewards')
               
               # From baselines code:
               
@@ -231,9 +235,18 @@ class PPOAgent(object):
               
               # Total loss
               total_loss = pg_loss + vf_loss * vf_coef - ent_loss * ent_coef
-              
+
+              # Reward prediction loss
+              rewards = tf.pad(
+              	       batch_returns, [[1,0]]) - tf.pad(batch_returns, [[0,1]])
+              rewards = rewards[:-2]
+
+              r_loss = .5 * tf.reduce_mean(
+                      tf.square(reward_pred - rewards), name='PPO_reward_loss')
+              #total_loss += 100 * r_loss
+
               become_skynet_penalty = 100000000
-              total_loss += become_skynet_penalty
+              #total_loss += become_skynet_penalty
               
               train_ops.append(trainer.minimize(total_loss))
               
@@ -242,6 +255,7 @@ class PPOAgent(object):
                 train_summaries.append(tf.summary.scalar('pg_loss', pg_loss))
                 train_summaries.append(tf.summary.scalar('vf_loss', vf_loss))
                 train_summaries.append(tf.summary.scalar('entrophy', ent_loss))
+                train_summaries.append(tf.summary.scalar('r_loss', r_loss))
                 train_summaries.append(tf.summary.histogram('values', value)) 
                 train_summaries.append(tf.summary.scalar('value', 
                     tf.reduce_mean(value)))          
@@ -316,9 +330,8 @@ class PPOAgent(object):
     #        self.returns: ret,
     #    }
     #    _ = self.session.run(self.train_op, feed_dict=feed_dict)
-        
-        
-        
+
+
     def _add_actor(self, rendering=0, record=None):
         actor = ActorProcess(self.num_actors,
                              self.prediction_queue,
@@ -513,6 +526,8 @@ if __name__ == '__main__':
     
     import gym
     import gym_vgdl
+
+    import procgen_env
     
     # Uncomment to throw numpy warnings
     #import warnings
@@ -593,14 +608,14 @@ if __name__ == '__main__':
     # Set up env
     env_cons = lambda: gym.make(args.env)
     wrappers = []
-    
+
     env = env_cons()
     args.num_actions = env.action_space.n
     args.history_len = 0
     
     # Set agent variables and wrap env based on chosen mode
     mode = args.model
-    
+
 
     # Prewrapping for certain envs
     from gym.envs.atari.atari_env import AtariEnv

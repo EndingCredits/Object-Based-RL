@@ -72,7 +72,8 @@ def self_attn_qkv(x,
       v = linear(x, value_size, use_bias=False, reuse=reuse, name='value')
       
     def split_heads(x, num_heads):
-        return reshape_range(x, [num_heads, -1])
+        x = reshape_range(x, [num_heads, -1])
+        return transpose(x, [-3, -2])
     
     if num_heads != 1:
       q = split_heads(q, num_heads)
@@ -80,7 +81,7 @@ def self_attn_qkv(x,
       v = split_heads(v, num_heads)
       
       if mask is not None:
-          mask = tf.expand_dims(mask, -1) #Will be the same mask for every head
+          mask = tf.expand_dims(mask, -3) #Will be the same mask for every head
       
       key_depth_per_head = key_size // num_heads
       q *= key_depth_per_head**-0.5
@@ -96,7 +97,7 @@ def self_attn_qkv(x,
     v_out = dot_product_attn(q, k, v, mask)
     
     def join_heads(x):
-        return reshape_range(x, [value_size], -2, 2)
+        return reshape_range(transpose(x, [-3, -2]), [value_size], -2, 2)
         
     if num_heads != 1:
         v_out = join_heads(v_out)
@@ -186,6 +187,23 @@ def reshape_range(x, new_shape, dim_start=-1, num_dims=1):
     
     return out
     
+def transpose(x, transpose_dims):
+    """
+    More comprehensive transpose wrapper
+    """
+
+    num_in_dims = len(shape_list(x))
+    out_dims = list(range(num_in_dims))
+
+    for i, _ in enumerate(transpose_dims):
+        j = (i+1) % len(transpose_dims)
+        dim_i = transpose_dims[i] % num_in_dims
+        dim_j = transpose_dims[j] % num_in_dims
+        # swap ith and jth dim in out dims
+        out_dims[dim_i] = dim_j
+
+    return tf.transpose(x, out_dims)
+
 
 def get_mask(x):
     """

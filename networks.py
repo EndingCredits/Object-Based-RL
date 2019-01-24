@@ -270,4 +270,71 @@ def relational_object_network(state,
     
     # Returns the network output
     return out
+
+
+def relational_object_network2(state,
+                               mask=None,):
+
+    # Keeping track of which initilizer and activation funcs are used
+    initializer = tf.truncated_normal_initializer(0, 0.02)
+    activation_fn = tf.nn.relu
+    
+    if mask is None:
+       mask = get_mask(state) # Get mask directly from state
+    
+    # Embedding Part:
+    ##################################
+    el = state
+    
+    # Calculate weight matrix
+    def distance_matrix(x_1, x_2):
+        x_1 = tf.expand_dims(x_1, -3)
+        x_2 = tf.expand_dims(x_2, -2)
+        sq_diff = tf.square(x_1 - x_2)
+        return tf.reduce_sum(sq_diff, -1)
+    
+    positions = el[..., :2]
+    dists = distance_matrix(positions, positions) + 1e-6
+    logits = tf.math.reciprocal(dists)
+    logits = logits + (1-mask)*10e9
+    weights = tf.nn.softmax(logits)
+    
+    
+    # Do the first layer without equivariant transform
+    el = position_preserving_embedding(el, 128, name='initial_embedding')
+    
+    # Add a number of attention blocks
+    def weighted_attention(weights, v):
+        return tf.matmul(weights, v)
+    
+    for i in range(2):
+        v = linear(el, 128, activation=activation_fn, name='l'+str(i)+'.1',
+                    kernel_initializer=initializer)
+        el_ = weighted_attention(weights, v)
+        el_ = linear(el_, 128, activation=activation_fn, name='l'+str(i)+'.2',
+                    kernel_initializer=initializer)
+        el = el + el_
+    
+    # Pool final elements to get input to task network
+    c = pool(el, mask)
+    
+    ##################################
+    
+    
+    # Fully connected (task) part:
+    ##################################
+    
+    l_o = [128]*3
+    
+    fc = c
+    for i, layer in enumerate(l_o):
+        fc = linear(fc, layer, activation=activation_fn, 
+                    kernel_initializer=initializer, name='lO_' + str(i))
+                    
+    ##################################
+    
+    out = fc
+    
+    # Returns the network output
+    return out
     
