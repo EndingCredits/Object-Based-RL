@@ -4,7 +4,7 @@ import numpy as np
 from gym.envs.registration import register
 import os
 
-DATA_DIR = os.path.dirname(__file__)
+DATA_DIR = os.path.join(os.path.dirname(__file__), "games")
 
 
 class procGen(VGDLEnv):
