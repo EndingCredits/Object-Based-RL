@@ -573,8 +573,8 @@ if __name__ == '__main__':
         
         # Start agent
         state = env.reset()
-        print(state)
         agent.Reset(state)
+        
         ep_r = 0
         ep_rewards = []
         ep_reward_last=0
