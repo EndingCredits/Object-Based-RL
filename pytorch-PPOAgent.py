@@ -4,15 +4,37 @@ Adapted from NVIDIA GA3C code
 
 from __future__ import division
 import numpy as np
-import cv2
 import os
-import tensorflow as tf
+
 from threading import Thread
 from multiprocessing import Process, Queue, Value
 import time
 
 from Actor import RolloutActor
-from ops import linear
+
+import tensorflow as tf
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+class MLP(nn.Module):
+    def __init__(self, in_shape, num_actions):
+        super(MLP, self).__init__()
+
+        self.fc1 = nn.Linear(in_shape[-1], 128)
+        self.fc2 = nn.Linear(128, 128)
+
+        self.predict = nn.Linear(128, num_actions)
+        self.value = nn.Linear(128, 1)
+
+    def forward(self, x):
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        return self.predict(x), self.value(x)
+
+
 
 class PPOAgent(object):
 
@@ -37,7 +59,7 @@ class PPOAgent(object):
         # Double Q
         # Addressing Function Approximation Error in Actor-Critic Methods
         #     - Fujimoto et al.
-        self.use_double_q = args.double_critic
+        #self.use_double_q = args.double_critic
 
         # Training parameters
         self.train_count = args.num_epoch
@@ -83,255 +105,33 @@ class PPOAgent(object):
 
         # Set up model:
         ##################################
-        if self.model_type == 'CNN':
-            from networks import deepmind_CNN
-            self.model = deepmind_CNN
-        elif self.model_type == 'fully-connected':
-            from networks import fully_connected_network
-            self.model = fully_connected_network
-        elif self.model_type == 'object':
-            #from networks import object_embedding_network2
-            #self.model = object_embedding_network2
-            from networks import relational_object_network
-            self.model = relational_object_network
-
-        self._build_graph()
-        self.session.run(tf.global_variables_initializer())
+        self.model = MLP(self.obs_size, self.n_actions)
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate,
+          eps=1e-5)
         
         # Start up threads:
         ##################################
         self.predictor_thread.start()
 
-
-    def _build_graph(self):
-
-        # Training graph
-        with tf.name_scope('train'):
-          with tf.device('gpu:0'):
-            self._build_train_graph()
-
-        # Prediction graph
-        with tf.name_scope('predict'):
-          with tf.device('cpu:0'):
-            self._build_predict_graph()
-
-        # Saver
-        self.model_weights = tf.get_collection(
-            tf.GraphKeys.GLOBAL_VARIABLES, scope=self.name+'_model')
-        self.saver = tf.train.Saver(self.model_weights)
-            
-
-    def _build_train_graph(self):
-
-        # Build Queue pipeline
-        with tf.name_scope('input_pipeline'):
-            prepend = [] if self.history_len == 0 else [self.history_len]
-            state_dim = prepend + self.obs_size
-
-            tfqueuetype = tf.PaddingFIFOQueue if self.obs_size[0] == None \
-                              else tf.FIFOQueue
-
-            self.model_train_queue = tfqueuetype( self.memory_queue_size,
-              dtypes = [ tf.float32, tf.int64, tf.float32, tf.float32,
-                         tf.float32],
-              shapes = [ state_dim, [], [], [], [self.n_actions] ],
-              names = [ 'state', 'action', 'advantage', 'return', 'actprob', ],
-              name = 'model_train_queue' )
-            self.model_train_queue_len = 0
-
-            multi_batch_size = self.batch_size * self.batch_count
-            mbs = tf.placeholder_with_default(multi_batch_size, [])
-            multi_batch = self.model_train_queue.dequeue_many(mbs) 
-
-            self.state = multi_batch['state']
-            self.action = multi_batch['action']
-            self.advantage = multi_batch['advantage']
-            self.returns = multi_batch['return']
-            self.old_probs = multi_batch['actprob']
-
-            # Reuse same placeholders for adding items
-            feed_dict = { 'state': self.state,
-                          'action': self.action,
-                          'advantage': self.advantage,
-                          'return': self.returns,
-                          'actprob': self.old_probs, }
-            
-            self.model_enqueue = self.model_train_queue.enqueue_many(
-                                            feed_dict, name="queue_data")
-        
-        
-        # Naive implementation of multiple minibatch iterations
-        trainer = tf.train.AdamOptimizer(learning_rate=self.learning_rate,
-                                         epsilon=1e-5, name='optimizer')
-        
-        # rename of variables for convenience                         
-        eps = self.clip_ratio
-        vf_coef = self.vf_penalty
-        ent_coef = self.entrophy_penalty
-                                        
-        
-        train_summaries = []
-        train_summaries.append(tf.summary.histogram('returns', self.returns)) 
-        train_summaries.append(tf.summary.scalar('return', 
-                    tf.reduce_mean(self.returns)))
-        train_summaries.append(tf.summary.histogram('advantages',
-                    self.advantage)) 
-        train_summaries.append(tf.summary.scalar('advantage', 
-                    tf.reduce_mean(self.advantage))) 
-        
-
-        # Create train graph for N epochs of B batches
-        train_ops = []
-        idx = tf.range(multi_batch_size)
-        train_idx = tf.reshape(tf.random_shuffle(idx), [self.batch_count, -1])
-        for i in range(self.train_count):
-         with tf.name_scope('epoch_'+str(i)):
-          
-          for b in range(self.batch_count):
-           with tf.name_scope('batch_'+str(i)):
-            
-             with tf.control_dependencies(train_ops):
-              
-              batch_idx = train_idx[b]
-              batch_state = tf.gather(self.state, batch_idx)
-              batch_action = tf.gather(self.action, batch_idx)
-              batch_old_probs = tf.gather(self.old_probs, batch_idx)
-              batch_advantage = tf.gather(self.advantage, batch_idx)
-              batch_returns = tf.gather(self.returns, batch_idx)
-              
-              with tf.variable_scope(self.name + '_model', reuse=tf.AUTO_REUSE):
-                emb = self.model(batch_state)
-                predict = linear(tf.nn.relu(emb), self.n_actions, name='probs')
-                value = linear(tf.nn.relu(emb), 1, name='value')
-                if self.use_double_q: # add second critic
-                  value2 = linear(tf.nn.relu(emb), 1, name='value2')
-
-                reward_pred = linear(tf.nn.relu(emb), 1, name='rewards')
-              
-              # From baselines code:
-              
-              # Policy gradient loss, with PPO constraint
-              probs = tf.nn.softmax(predict, name='normalised_probs') + 1e-5
-              action_oh = tf.one_hot(batch_action, self.n_actions, 1.0, 0.0)
-              ratio = tf.reduce_sum(( probs / batch_old_probs ) * \
-                                             action_oh, axis=1, name='PPO_r')
-              pg_loss = - batch_advantage * ratio
-              pg_loss_clipped = - batch_advantage * tf.clip_by_value(ratio,
-                                            1.0 - eps, 1.0 + eps)
-              pg_loss = tf.reduce_mean(tf.maximum(pg_loss, pg_loss_clipped),
-                                        name='PPO_pg_loss')
-              
-              # Critic (value function) loss
-              vf_loss = .5 * tf.reduce_mean(tf.square(value - batch_returns),
-                                             name='PPO_vf_loss')
-                                             
-              if self.use_double_q: # loss for second critic
-                  vf_loss += .5 * tf.reduce_mean(
-                      tf.square(value2 - batch_returns), name='PPO_vf2_loss')
-              
-              # Entrophy loss
-              entrophy = - tf.reduce_sum( probs * tf.log(probs), axis=1)
-              ent_loss = tf.reduce_mean( entrophy, name='PPO_entrophy')
-              
-              # Total loss
-              total_loss = pg_loss + vf_loss * vf_coef - ent_loss * ent_coef
-
-              # Reward prediction loss
-              rewards = tf.pad(
-              	       batch_returns, [[1,0]]) - tf.pad(batch_returns, [[0,1]])
-              rewards = rewards[:-2]
-
-              r_loss = .5 * tf.reduce_mean(
-                      tf.square(reward_pred - rewards), name='PPO_reward_loss')
-              #total_loss += 100 * r_loss
-
-              become_skynet_penalty = 100000000
-              #total_loss += become_skynet_penalty
-              
-              train_ops.append(trainer.minimize(total_loss))
-              
-              # Add Summaries
-              if i==0 and b==0: # only if first batch of last iter
-                train_summaries.append(tf.summary.scalar('pg_loss', pg_loss))
-                train_summaries.append(tf.summary.scalar('vf_loss', vf_loss))
-                train_summaries.append(tf.summary.scalar('entrophy', ent_loss))
-                train_summaries.append(tf.summary.scalar('r_loss', r_loss))
-                train_summaries.append(tf.summary.histogram('values', value)) 
-                train_summaries.append(tf.summary.scalar('value', 
-                    tf.reduce_mean(value)))          
-                for a in range(self.n_actions):
-                  train_summaries.append(tf.summary.scalar(
-                      'action_prob/'+str(a), tf.reduce_mean(probs[:,a])))
-                  train_summaries.append(tf.summary.histogram(
-                                   'action_probs/'+str(a), probs[:,a]))
-                                   
-        self.train_op = tf.group(train_ops)    
-              
-        train_summaries.append(tf.summary.scalar('queue_size',
-                  self.model_train_queue.size()))
-        self.train_summaries = tf.summary.merge(train_summaries)
-                  
-                  
-    def _build_predict_graph(self):
-    
-        prepend = [None] if self.history_len == 0 else [None, self.history_len]
-        state_dim = prepend + self.obs_size
-        
-        self.state_pred = tf.placeholder("float", state_dim, name='state_ph') 
-        
-        with tf.variable_scope(self.name + '_model', reuse=True):
-          emb = self.model(self.state_pred)
-          predict = linear(tf.nn.relu(emb), self.n_actions, name='probs')
-          value = linear(tf.nn.relu(emb), 1, name='value')
-          if self.use_double_q:
-            value2 = linear(tf.nn.relu(emb), 1, name='value2')
-        
-        self.action_probs = tf.nn.softmax(predict) + 1e-5
-        self.value = tf.squeeze(value, axis=1)
-        if self.use_double_q: # Return minimum of both critics for target
-            self.value = tf.minimum(self.value, tf.squeeze(value2, axis=1))
-
         
     def _get_action(self, state):
         if self.obs_size[0] == None:
             state = batch_objects(state)
-        probs, value = self.session.run([self.action_probs, self.value],
-                                       feed_dict = { self.state_pred: state })
-   
-        num_act = np.shape(probs)[1]
-        try:
-            act = [ np.random.choice(range(num_act), p=prob ) for prob in probs ]
-        except:
-            print(probs)
-        return act, probs, value
-        
-    def _add_batch(self, s, a, p, ret, adv):
-        if self.obs_size[0] == None:
-            s = batch_objects(s)
-        feed_dict = {
-            self.state: s,
-            self.action: a,
-            self.old_probs: p,
-            self.advantage: adv,
-            self.returns: ret,
-        }
-        
-        self.session.run(self.model_enqueue, feed_dict=feed_dict)
-        self.model_train_queue_len += len(s)
-        
-    #def _train(self, s, a, p, ret, adv):
-    #    if self.obs_size[0] == None:
-    #        s = batch_objects(s)
-    #    feed_dict = {
-    #        self.state: s,
-    #        self.action: a,
-    #        self.old_probs: p,
-    #        self.advantage: adv,
-    #        self.returns: ret,
-    #    }
-    #    _ = self.session.run(self.train_op, feed_dict=feed_dict)
 
+        with torch.no_grad():
+            state = torch.Tensor(state)
+            preds, value = self.model(state)
 
+            probs = F.softmax(preds, dim=1).numpy()
+
+            num_act = np.shape(probs)[1]
+            try:
+                act = [ np.random.choice(range(num_act), p=prob ) for prob in probs ]
+            except:
+                print(probs)
+            return act, probs, value.numpy()[..., 0]
+
+        
     def _add_actor(self, rendering=0, record=None):
         actor = ActorProcess(self.num_actors,
                              self.prediction_queue,
@@ -353,13 +153,76 @@ class PPOAgent(object):
                  
 
     def Train(self):
-        while self.model_train_queue_len < self.batch_size * self.batch_count:
+
+        # Get training batches from training queue
+        while len(self.experience_memory) < self.batch_size * self.batch_count:
             self._pump_experience_queue()
-        self.model_train_queue_len -= self.batch_size * self.batch_count
-        _, summary = self.session.run([self.train_op, self.train_summaries])
+
+        batches = []
+        for b in range(self.batch_count):
+            batch = []
+            for j in range(self.batch_size):
+                ind = np.random.randint(len(self.experience_memory))
+                batch.append(self.experience_memory.pop(ind))
+            batches.append(batch)
+
+        # rename of variables for convenience                         
+        eps = self.clip_ratio
+        vf_coef = self.vf_penalty
+        ent_coef = self.entrophy_penalty  
+
+        for i in range(self.train_count):
+          for batch in batches:
+
+            batch_state = [ e[0] for e in batch ]
+            if self.obs_size[0] == None:
+                batch_state = batch_objects(batch_state)
+            batch_state = torch.Tensor( batch_state )
+            batch_action = torch.Tensor([ e[1] for e in batch ])
+            batch_old_probs = torch.Tensor([ e[2] for e in batch ])
+            batch_advantage = torch.Tensor([ e[3] for e in batch ])
+            batch_returns = torch.Tensor([ e[4] for e in batch ])
+        
+            # Forward pass
+            predict, value = self.model(batch_state)
+            
+            # Policy gradient loss, with PPO constraint
+            probs = F.softmax(predict, dim=1) + 1e-5
+            action_oh = F.one_hot(batch_action.long(), self.n_actions).float()
+            ratio = torch.sum( ( probs / batch_old_probs ) *  action_oh, dim=1)
+
+            pg_loss = - batch_advantage * ratio
+            pg_loss_clipped = - batch_advantage * torch.clamp(ratio, 1.0 - eps, 1.0 + eps)
+            pg_loss = torch.max(pg_loss, pg_loss_clipped).mean()
+            
+            # Critic (value function) loss
+            vf_loss = .5 * (value - batch_returns).pow(2).mean()
+            
+            # Entrophy loss
+            entrophy = - torch.sum( probs * torch.log(probs), dim=1)
+            ent_loss = entrophy.mean()
+            
+            # Total loss
+            total_loss = pg_loss + vf_loss * vf_coef - ent_loss * ent_coef
+
+            become_skynet_penalty = 100000000
+            #total_loss += become_skynet_penalty
+
+            # Reward prediction loss
+            #rewards = tf.pad(
+            #         batch_returns, [[1,0]]) - tf.pad(batch_returns, [[0,1]])
+            #rewards = rewards[:-2]
+            
+            self.optimizer.zero_grad()
+            total_loss.backward()
+            self.optimizer.step()
+
+
         self.train_step += 1
-        return summary
+        return None
           
+
+
     def _pump_experience_queue(self):  
         # Get training data
         traj = []
@@ -382,20 +245,22 @@ class PPOAgent(object):
         adv = returns - values
         
         adv = (adv - np.mean(adv)) / (np.std(adv) + 1e-8)
-        self._add_batch(states, actions, probs, returns, adv)
-        
-        
+
+        for j in range(len(states)):
+          self.experience_memory.append(
+            (states[j], actions[j], probs[j], adv[j], returns[j]) )
+
+
+ 
+
+
     def Save(self, save_dir, step=None):
         # Save model to file
-        save_path = os.path.join(save_dir, 'model')
-        self.saver.save(self.session, save_path, global_step=step)
+        raise NotImplementedError
 
     def Load(self, save_dir):
         # Load model from file
-        save_path = os.path.join(save_dir, 'model')
-        ckpt = tf.train.get_checkpoint_state(save_path)
-        print("Loading model from {}".format(ckpt.model_checkpoint_path))
-        self.saver.restore(self.session, ckpt.model_checkpoint_path)
+        raise NotImplementedError
         
     def __del__(self):
         while self.actors:
@@ -403,6 +268,7 @@ class PPOAgent(object):
         time.sleep(100)
         self.predictor_thread.join()
             
+
 
 class ActorProcess(Process, RolloutActor):
     def __init__(self,
@@ -594,8 +460,8 @@ if __name__ == '__main__':
     parser.add_argument('--n_step', type=int, default=100,
                        help='Length of rollout (not used)')
                        
-    parser.add_argument('--double_critic', action='store_true',
-                       help='Set to use double critic')
+    #parser.add_argument('--double_critic', action='store_true',
+    #                   help='Set to use double critic')
 
 
                        
@@ -704,7 +570,7 @@ if __name__ == '__main__':
                   'entrophy_penalty',
                   'discount',
                   'lam',
-                  'double_critic',
+                  #'double_critic',
                  ]
     
     timestamp = datetime.datetime.now().strftime("%y-%m-%d.%H.%M.%S")
