@@ -8,6 +8,7 @@ import os
 
 from threading import Thread
 from multiprocessing import Process, Queue, Value
+from multiprocessing.pool import ThreadPool
 import time
 
 from Actor import RolloutActor
@@ -18,6 +19,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from json2vec import JSONTreeLSTM
 
 class MLP(nn.Module):
     def __init__(self, in_shape, num_actions):
@@ -34,10 +36,26 @@ class MLP(nn.Module):
         x = F.relu(self.fc2(x))
         return self.predict(x), self.value(x)
 
+class JSON_NN(nn.Module):
+    def __init__(self, in_shape, num_actions):
+        super(JSON_NN, self).__init__()
+
+        self.tree = JSONTreeLSTM(mem_dim=64)
+        self.predict = nn.Linear(128, num_actions)
+        self.value = nn.Linear(128, 1)
+
+
+    def forward(self, x):
+        
+        #with ThreadPool(8) as p:
+        #    elems = p.map(self.tree, x)
+        elems = [self.tree(z) for z in x]
+        x = torch.cat( elems, dim=0 )
+        
+        return self.predict(x), self.value(x)
 
 
 class PPOAgent(object):
-
 
     def __init__(self, session, env_constructor, args):
 
@@ -105,7 +123,7 @@ class PPOAgent(object):
 
         # Set up model:
         ##################################
-        self.model = MLP(self.obs_size, self.n_actions)
+        self.model = JSON_NN(self.obs_size, self.n_actions)
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate,
           eps=1e-5)
         
@@ -119,8 +137,11 @@ class PPOAgent(object):
             state = batch_objects(state)
 
         with torch.no_grad():
-            state = torch.Tensor(state)
+            if not self.obs_size == [1,]:
+                state = torch.Tensor( state )
             preds, value = self.model(state)
+
+            #print(preds.shape, value.shape)
 
             probs = F.softmax(preds, dim=1).numpy()
 
@@ -129,6 +150,7 @@ class PPOAgent(object):
                 act = [ np.random.choice(range(num_act), p=prob ) for prob in probs ]
             except:
                 print(probs)
+
             return act, probs, value.numpy()[..., 0]
 
         
@@ -177,7 +199,8 @@ class PPOAgent(object):
             batch_state = [ e[0] for e in batch ]
             if self.obs_size[0] == None:
                 batch_state = batch_objects(batch_state)
-            batch_state = torch.Tensor( batch_state )
+            if not self.obs_size == [1,] :
+                batch_state = torch.Tensor( batch_state )
             batch_action = torch.Tensor([ e[1] for e in batch ])
             batch_old_probs = torch.Tensor([ e[2] for e in batch ])
             batch_advantage = torch.Tensor([ e[3] for e in batch ])
@@ -598,11 +621,11 @@ if __name__ == '__main__':
         
         if args.log:
             # Create writer
-            writer = tf.summary.FileWriter(log_path, sess.graph)
             ep_rs = tf.placeholder(tf.float32, [None])
             reward_summary = tf.summary.merge(
                 [ tf.summary.histogram('rewards', ep_rs), 
                   tf.summary.scalar('mean_rewards', tf.reduce_mean(ep_rs)), ] )
+            writer = tf.summary.FileWriter(log_path, sess.graph)
         
             # Copy source files
             import glob
@@ -624,8 +647,8 @@ if __name__ == '__main__':
         
         for step in trange(training_iters):
             summary = agent.Train()
-            if args.log:
-                writer.add_summary(summary, step)
+            #if args.log:
+            #    writer.add_summary(summary, step)
 
             if step % display_step == 0 and step != 0:
                 ep_rewards = agent.ep_rs
